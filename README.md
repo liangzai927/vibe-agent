@@ -214,6 +214,7 @@ docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
 | `VA_WORKSPACE` | `/workspace` | agent 的工作区（沙箱根目录） |
 | `VA_TEMPERATURE` | `0` | 编码任务建议保持 0 |
 | `VA_MAX_ITERATIONS` | `50` | 单任务最大步数 |
+| `VA_MAX_DELEGATE_DEPTH` | `1` | 子 agent 最多嵌套几层（1 = 子 agent 不能再往下派） |
 | `VA_AUTO_APPROVE` | `0` | `1` = 跳过所有审批（危险） |
 | `VA_CONTEXT_BUDGET` | `60000` | 估算 token 超过此值就压缩历史 |
 | `VA_SESSION_DIR` | `<工作区>/.va/sessions` | 会话文件位置 |
@@ -225,17 +226,120 @@ docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
 
 ---
 
+## 功能开发流水线
+
+```bash
+python3 run.py feature "给用户列表加分页，每页 20 条，页码体现在 URL 里"
+python3 run.py feature --doc docs/PRD.docx --design mockups/list.png "按需求文档实现列表页"
+```
+
+一条命令跑完六步：
+
+```
+1. 理解需求   读文档（read_document）、解析设计稿（read_design）
+2. 读懂现状   glob / grep / read_file 摸清结构，找最接近的现有实现当参照
+3. 实现       按计划逐步做，每步更新计划状态
+4. 自测       跑测试/构建，UI 改动用 render_page 看真实效果
+              ——没通过就修到通过为止
+5. 独立审查   review_changes 起一个干净上下文的审查者，把需求原文一并给它
+6. 提交       git_commit，跨多个不相关方面就拆成多个提交
+```
+
+**哪些是代码写死的**：建分支、状态检查、可选推送。
+**哪些交给模型**：怎么拆计划、怎么写代码、审出来的问题怎么改。
+
+三条刻意的约束：
+
+- **关键决策先问，不自己拍板**。需求里没写清楚又会影响结果的地方，停下来问。
+- **发现需求矛盾直接说**，不要硬做——硬做的结果是一堆需要返工的代码。
+- **工作量远超预期就停**，别硬撑。
+
+**刻意不自动推送。** 推送会把改动推给别人看到，这一步该由人决定。需要显式传 `--push`。
+
+退出码也不只看「跑完了」：计划里还有未完成步骤时返回 1，提醒你可能漏了什么。
+
+### 分支名怎么来的
+
+从需求里的英文词生成：`add pagination` → `feat/pagination`。
+纯中文需求抽不出英文词时退回时间戳（`feat/1023-1540`），
+而不是硬编出一个 `feat/---`。也可以 `--branch` 自己指定，或 `--no-branch` 就地改。
+
+---
+
+## 规划层
+
+多步任务不拆步骤，模型会来回打转、重复劳动、忘记做过什么。
+更糟的是**上下文一压缩，中间那句「A 已经改完了」就没了**，它会从头再做一遍。
+
+所以计划是一份**显式的、会被渲染出来的状态**，而不是模型脑子里的隐性推理：
+
+```
+● 第 4 步
+  目标  给用户列表加分页
+  进度  2/5
+
+    ☑ 1. 读现有列表实现
+    ☑ 2. 确定分页参数放哪
+    ▸ 3. 实现 slice 逻辑
+        ↳ 正在改 list.ts
+    ☐ 4. 补测试
+    ☐ 5. 提交
+```
+
+三个关键设计：
+
+- **压缩后重新注入**。计划通常建在很早的步骤里，按「保留最近 N 条」的规则
+  必然被丢掉。丢掉之后模型就忘了自己干到哪。
+- **落盘到会话文件**，恢复会话时连计划一起恢复，并在第一轮的系统提示词里带上。
+- **容错而非报错**。模型给出畸形步骤（未知状态、重复标题、一次两个 in_progress）
+  时，能修的修、修不了的记成提醒——计划是辅助手段，格式问题不该打断正经工作。
+
+---
+
+## 子 agent 与独立审查
+
+两种活会拖垮主对话：
+
+1. 「在几十个文件里找出这个报错是谁抛的」——过程翻十几个文件，结论只有一行；
+2. 「独立审查这份改动」——同一个上下文里，模型会顺着自己刚才的思路看，
+   跳过那些「我本来就是这么想的」的地方，而那些恰恰是 bug 藏身处。
+
+两者都能用「换个干净上下文去做，只把结论带回来」解决。
+
+```
+delegate(task, mode="read"|"write")   通用委派
+review_changes(requirement=...)       专门的代码审查
+```
+
+| | read 模式 | write 模式 |
+|---|---|---|
+| 可用工具 | 只读的 11 个 | 加上写文件、跑命令、建分支、提交 |
+| 不给 | 所有写操作 | `git_push`、`git_init`、`delegate` |
+
+**刻意不允许递归委派。** 子 agent 拿不到 `delegate`——省下的那点并行度，
+不值得换来失控的成本和难以追踪的调用链。
+
+**审查者建议连需求原文一起给**，它才能判断「做对了没有」，
+而不只是「代码写得对不对」。没给的话它会明确告诉你「需求符合度无法判断」，
+而不是臆测一个需求出来。
+
+**未跟踪的新文件也算进审查范围**——新写的代码同样需要审，
+不能因为没 `git add` 就漏掉。
+
+---
+
 ## UI 还原闭环
 
-这是让 agent 真正能「照着设计稿做界面」的部分。三个工具分工：
+这是让 agent 真正能「照着设计稿做界面」的部分。四个工具分工：
 
 | 工具 | 作用 | 花不花 token |
 |---|---|---|
+| `read_design` | 设计稿图片 → 结构化文字规格，落盘到 `.va/designs/` | 花一次 |
 | `render_page` | 渲染页面截图，**顺带捞出控制台报错和资源加载失败** | 不花 |
 | `pixel_diff` | 逐像素对比，给出差异百分比 + 差异热力图 | 不花 |
 | `compare_with_design` | 调多模态模型，给出「哪里不像、该先改什么」 | 花 |
 
-闭环是：**改代码 → render_page → pixel_diff / compare_with_design → 按差异改 → 再渲染**。
+闭环是：**读设计稿 → 改代码 → render_page → pixel_diff / compare_with_design → 按差异改 → 再渲染**。
 
 ![UI 还原闭环](docs/ui-loop.png)
 
@@ -248,8 +352,13 @@ docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
 ### 为什么图片不进主对话
 
 主模型往往不支持读图（`deepseek-chat` 就不支持），而且把 base64 塞进消息历史
-会同时撑爆上下文和会话文件。所以读图只发生在 `compare_with_design` 内部，
-对外只返回文字结论。这样主模型用纯文本模型也能享受完整的视觉迭代能力。
+会同时撑爆上下文和会话文件。所以读图只发生在工具内部，对外只返回文字结论。
+
+`read_design` 更进一步：一次视觉调用换一份**结构化文字规格**，之后所有迭代
+都走文字通道。这样纯文本模型也能做 UI，而这正是「读 UI 图」这个需求的解法。
+
+规格会落盘到 `.va/designs/<图片名>.md`——它通常上千 token，实现到一半上下文被
+压缩后仍然需要它，落盘之后 `read_file` 随时能取回。
 
 ### 为什么客观指标和主观判断分开
 
@@ -281,11 +390,19 @@ docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
 
 ```
 /help            帮助                 /tools        列出工具（含副作用标记）
+/feature <需求>  跑一遍功能开发流水线    /plan         查看当前任务计划
 /diff            本次会话所有文件改动   /undo [N]     撤销最近 N 次文件改动
 /checkpoints     列出可撤销的步骤       /sessions     列出历史会话
 /reset           清空对话历史          /compact      立即压缩上下文
 /init            生成 AGENTS.md        /cwd          显示工作区
 /exit            退出
+```
+
+子命令：
+
+```bash
+python3 run.py doctor [--offline] [--quick] [--json]    # 环境自检
+python3 run.py feature "需求描述" [--doc X] [--design Y]  # 功能开发流水线
 ```
 
 `/init` 会扫描项目并生成 `AGENTS.md`。之后每次启动，这个文件都会被自动读进系统提示词——
@@ -296,22 +413,30 @@ docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
 ## 架构
 
 ```
-run.py / va/cli.py        REPL、命令行、doctor、会话恢复
+run.py / va/cli.py        REPL、命令行、doctor / feature 子命令、会话恢复
         │
         ▼
 va/loop.py   Agent        主循环：调模型 → 执行工具 → 结果回灌 → 再调模型
         │                 （含审批、参数容错、上下文压缩、快照、落盘）
         ├──► va/llm.py         OpenAI 兼容流式客户端，聚合 tool_calls 分片
-        ├──► va/tools/         工具实现
+        ├──► va/tools/         工具实现（23 个）
+        │      plan.py         update_plan（计划）
         │      fs.py           read_file / write_file / edit_file / list_dir
         │      search.py       glob / grep
         │      shell.py        run_bash（超时、进程组清理、危险命令拦截）
         │      git.py          status / diff / log / 建分支 / 提交 / 推送
         │      render.py       render_page / pixel_diff / compare_with_design
+        │      design.py       read_design（设计稿 → 文字规格）
+        │      document.py     read_document（Word / PDF / HTML / Markdown）
+        │      delegate.py     delegate（子 agent 委派）
+        │      review.py       review_changes（独立审查者）
+        │      context.py      WorkspaceTool 基类 + AgentContext
         ├──► va/workspace.py   路径沙箱：所有读写必须落在工作区内
         ├──► va/diffview.py    unified diff 生成、着色、统计
         ├──► va/history.py     文件快照 + 检查点栈（撤销）
-        ├──► va/session.py     JSONL 会话持久化
+        ├──► va/session.py     JSONL 会话持久化（含计划）
+        ├──► va/plan.py        计划模型 + 看板
+        ├──► va/feature.py     功能开发流水线
         ├──► va/browser.py     浏览器探测与启动（不假设环境）
         ├──► va/imaging.py     图片编码与像素对比（Pillow 可选）
         ├──► va/doctor.py      环境自检
@@ -369,12 +494,12 @@ python3 -m unittest discover -s tests -v     # 用现有环境，缺依赖的用
 make test-full                                # 装齐依赖后跑，零跳过
 ```
 
-238 个测试，**不需要 API key**。缺可选依赖的用例会优雅跳过而不是变红——
+416 个测试，**不需要 API key**。缺可选依赖的用例会优雅跳过而不是变红——
 同一个套件在「只有核心依赖」和「装了全部依赖」的环境下都能跑：
 
 ```
-系统 python（仅核心）         238 tests, OK (skipped=14)
-venv（playwright+Pillow+pyyaml）238 tests, OK (skipped=1)
+系统 python（仅核心）              416 tests, OK (skipped=20)
+venv（playwright + Pillow + pyyaml）416 tests, OK (skipped=2)
 ```
 
 | 文件 | 覆盖 |
@@ -386,6 +511,12 @@ venv（playwright+Pillow+pyyaml）238 tests, OK (skipped=1)
 | `test_session.py` | 追加写、压缩重放、残缺行容错、跨进程恢复、恢复时的过期提醒 |
 | `test_render.py` | URL 解析、缺依赖的报错文案、真渲染截图、控制台报错捕获、元素截图、像素对比阈值 |
 | `test_environment.py` | 自检报告聚合、各项检查、浏览器候选优先级与去重、缺依赖提示 |
+| `test_plan.py` | 计划模型与容错归一化、压缩后重新注入、落盘与恢复、看板接线 |
+| `test_design.py` | 设计稿解析管线：提示词要求、图片真的作为图片传进去、规格落盘与截断 |
+| `test_document.py` | Markdown/HTML/Word/PDF 抽取、章节切片、扫描件与缺依赖的提示 |
+| `test_delegate.py` | 只读/写模式工具集、不递归、上下文隔离、撤销栈共享 |
+| `test_review.py` | 审查者只读、未跟踪文件纳入范围、缺需求时不臆测、任务书构建 |
+| `test_feature.py` | 分支名生成、六步任务书、建分支与退出码、不自动推送 |
 | `test_docker.py` | 容器配置一致性（见下） |
 
 ### 为什么给容器配置写测试
@@ -413,8 +544,8 @@ venv（playwright+Pillow+pyyaml）238 tests, OK (skipped=1)
 - [x] **Phase 2 · 干活能力** —— diff 预览、撤销、会话持久化
 - [x] **Phase 3 · 可移植 + UI 闭环** —— Docker 化、环境自检、浏览器探测、
       渲染截图、像素对比、设计稿多模态比对
-- [ ] **Phase 4 · 自主开发** —— 读需求文档 + UI 图 → 自动建分支 → 编码 → 自测 →
-      提交 → 推送的完整流水线，配合 planner / coder / reviewer 多 agent 分工
+- [x] **Phase 4 · 自主开发** —— 规划层、需求文档与设计图输入、子 agent 委派、
+      独立审查者、`va feature` 六步流水线
 
 ---
 
