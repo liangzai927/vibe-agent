@@ -17,12 +17,16 @@
 ARG PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-slim-bookworm
 
-ARG DEBIAN_FRONTEND=noninteractive
 ARG WITH_NODE=1
 ARG WITH_BROWSER=1
 ARG NODE_MAJOR=22
 
-ENV PYTHONUNBUFFERED=1 \
+# DEBIAN_FRONTEND 用 ENV 而不是 ARG。
+# 虽然 ARG 在 RUN 里也会作为环境变量生效，但那是公认的坑：
+# playwright install --with-deps 和 apt-get 都会开子进程装包，
+# ENV 能确保它们全都吃到 noninteractive，不会卡在交互式提问上。
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \

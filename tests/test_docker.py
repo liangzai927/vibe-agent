@@ -38,6 +38,10 @@ def read(path: Path) -> str:
 class TestDockerfile(unittest.TestCase):
     def setUp(self) -> None:
         self.text = read(DOCKERFILE)
+        # 注释里的示例（例如 `-v "$PWD:/workspace"`）不该被当成真实引用
+        self.code = "\n".join(
+            line for line in self.text.splitlines() if not line.lstrip().startswith("#")
+        )
 
     def test_referenced_files_exist(self):
         """COPY 的源文件必须真实存在，否则构建到一半才炸。"""
@@ -55,19 +59,65 @@ class TestDockerfile(unittest.TestCase):
         self.assertIn("requirements.txt", self.text)
         self.assertIn("requirements-browser.txt", self.text)
 
+    @staticmethod
+    def _split_at_from(text: str) -> tuple[str, str, str]:
+        """切成 (FROM 之前, FROM 那一行, FROM 之后)。
+
+        之前写成两段式很容易错位——FROM 那一行既不属于「之前」也不属于
+        「之后」，单独拿出来最不容易出错。
+        """
+        before, sep, rest = text.partition("\nFROM ")
+        if not sep:
+            return text, "", ""
+        from_line, _, after = rest.partition("\n")
+        return before, from_line, after
+
+    @classmethod
+    def _declared_after_from(cls, after: str) -> set[str]:
+        """收集 FROM 之后由 ARG / ENV 声明的变量名（含续行）。"""
+        joined = after.replace("\\\n", " ")
+        names: set[str] = set()
+        for line in joined.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(("ARG ", "ENV ")):
+                continue
+            body = stripped.split(None, 1)[1]
+            for token in body.split():
+                names.add(token.split("=", 1)[0])
+        return names
+
     def test_args_used_after_from_are_declared_after_from(self):
-        """FROM 之前声明的 ARG 在 FROM 之后不可见——这是最常见的构建失败原因之一。"""
-        _, _, body = self.text.partition("\nFROM ")
-        _, _, rest = body.partition("\n")
-        after_from = rest
-        declared = set(re.findall(r"^ARG\s+(\w+)", after_from, re.MULTILINE))
-        used = set(re.findall(r"\$\{?(\w+)\}?", after_from))
-        # 允许 FROM 之后的 ARG 引用自身
-        suspicious = {"WITH_NODE", "WITH_BROWSER", "NODE_MAJOR", "DEBIAN_FRONTEND"} - declared
+        """FROM 之前声明的 ARG 在 FROM 之后不可见——这是最常见的构建失败原因之一。
+
+        从实际出现的 $VAR / ${VAR} 反推需要哪些声明，而不是硬编码一份名单，
+        否则改了写法（比如 ARG 换成 ENV）测试就会误报。
+        """
+        before, from_line, after = self._split_at_from(self.code)
+        used = set(re.findall(r"\$\{?([A-Z_][A-Z0-9_]*)\}?", after))
+        declared = self._declared_after_from(after)
+
+        self.assertTrue(used, "解析器没找到任何变量引用，测试本身失效了")
+        undeclared = used - declared
         self.assertFalse(
-            suspicious,
-            f"这些 ARG 在 FROM 之后被使用但没有在 FROM 之后声明：{suspicious}",
+            undeclared,
+            f"这些变量在 FROM 之后被引用，但没有在 FROM 之后用 ARG/ENV 声明：{sorted(undeclared)}",
         )
+
+    def test_python_version_arg_is_declared_before_from(self):
+        """反过来：FROM 里用到的变量必须在 FROM 之前声明。"""
+        before, from_line, _ = self._split_at_from(self.code)
+        used_in_from = set(re.findall(r"\$\{?([A-Z_][A-Z0-9_]*)\}?", from_line))
+
+        self.assertTrue(
+            used_in_from,
+            f"解析器没从 FROM 行里找到变量，测试本身失效了（from 行：{from_line!r}）",
+        )
+        for name in used_in_from:
+            self.assertRegex(
+                before,
+                rf"(?m)^ARG\s+{re.escape(name)}\b",
+                f"{name} 在 FROM 里被使用，但 FROM 之前没有 ARG 声明它",
+            )
 
     def test_entrypoint_is_wired_up(self):
         self.assertIn("/app/docker/entrypoint.sh", self.text)
