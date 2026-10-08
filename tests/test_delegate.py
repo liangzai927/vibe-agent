@@ -31,6 +31,7 @@ from va.tools.delegate import (  # noqa: E402
     Delegate,
     DelegateReport,
     SubagentUI,
+    child_registry,
 )
 
 # 取自 SUBAGENT_SYSTEM 的独特句子。不能用「子 agent」这种词——
@@ -126,16 +127,16 @@ class TestToolFiltering(AgentTestCase):
         ))
 
     def test_read_mode_gets_only_read_only_tools(self):
-        tool = Delegate(AgentContext(workspace=self.workspace, cfg=self.cfg))
-        subset = tool._child_registry("read", PlanBoard())
+        ctx = AgentContext(workspace=self.workspace, cfg=self.cfg)
+        subset = child_registry(ctx, "read", PlanBoard())
         names = set(subset.names())
         self.assertEqual(names, set(READ_ONLY_TOOLS))
         for forbidden in ("write_file", "edit_file", "run_bash", "git_commit", "git_push", "delegate"):
             self.assertNotIn(forbidden, names, f"只读模式不该给 {forbidden}")
 
     def test_write_mode_adds_write_tools_but_not_push_or_delegate(self):
-        tool = Delegate(AgentContext(workspace=self.workspace, cfg=self.cfg))
-        subset = tool._child_registry("write", PlanBoard())
+        ctx = AgentContext(workspace=self.workspace, cfg=self.cfg)
+        subset = child_registry(ctx, "write", PlanBoard())
         names = set(subset.names())
         self.assertIn("write_file", names)
         self.assertIn("run_bash", names)
@@ -143,6 +144,7 @@ class TestToolFiltering(AgentTestCase):
         self.assertNotIn("git_push", names, "子 agent 不该能推远端")
         self.assertNotIn("git_init", names)
         self.assertNotIn("delegate", names, "不允许递归委派")
+        self.assertNotIn("review_changes", names, "审查者也不该被委派者调用")
         self.assertEqual(names, set(READ_ONLY_TOOLS) | set(WRITE_EXTRA_TOOLS))
 
     def test_filter_registry_shares_instances(self):

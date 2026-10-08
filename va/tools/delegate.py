@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,7 +38,7 @@ READ_ONLY_TOOLS = (
     "git_log",
 )
 
-# 写模式下额外允许的（仍然拿不到 git_push 和 delegate）
+# 写模式下额外允许的（仍然拿不到 git_push、git_init 和 delegate）
 WRITE_EXTRA_TOOLS = (
     "write_file",
     "edit_file",
@@ -74,10 +75,103 @@ class DelegateReport:
             f"  用到的工具：{tools}",
         ]
         if self.truncated:
-            lines.append("  ⚠ 它达到步数上限就停了，结论可能不完整")
+            lines.append(f"  ⚠ 它达到步数上限就停了，结论可能不完整")
         lines.append("")
         lines.append(self.text.strip() or "（它没有给出结论）")
         return "\n".join(lines)
+
+
+# --------------------------------------------------------------------- 装配
+
+
+def child_registry(ctx: AgentContext, mode: str, board: Any):
+    """给子 agent 装配工具集。只读模式真的只给只读工具。"""
+    from . import build_registry, filter_registry
+
+    registry = build_registry(ctx.workspace, cfg=ctx.cfg, plan_board=board)
+    allowed = READ_ONLY_TOOLS + (WRITE_EXTRA_TOOLS if mode == "write" else ())
+    return filter_registry(registry, only=set(allowed))
+
+
+def spawn_subagent(
+    ctx: AgentContext,
+    *,
+    task: str,
+    mode: str = "read",
+    context: str = "",
+    max_steps: int = 24,
+    system_prompt: str = SUBAGENT_SYSTEM,
+    label: str | None = None,
+) -> tuple[DelegateReport, str]:
+    """起一个干净上下文的子 agent 跑完任务，返回 (报告, 标签)。
+
+    委派工具和审查工具都走这里——它们只差一个提示词和一段任务描述。
+    """
+    from ..loop import Agent
+    from ..plan import PlanBoard
+
+    if ctx.ui is None:
+        raise ToolError("内部错误：子 agent 没有 UI 可用。")
+    if ctx.cfg is None:
+        raise ToolError("内部错误：子 agent 缺少配置。")
+
+    tag = label or preview(task, 24)
+    board = PlanBoard()
+    registry = child_registry(ctx, mode, board)
+    child_ui = SubagentUI(ctx.workspace, ctx.ui, tag)
+
+    # 继承父 agent 的配置，但按这次委派的要求收紧步数
+    child_cfg = dataclasses.replace(
+        ctx.cfg, max_iterations=max(1, min(int(max_steps), 60))
+    )
+
+    child = Agent(
+        child_cfg,
+        child_ui,
+        workspace=ctx.workspace,
+        registry=registry,
+        # 复用父 agent 的客户端实例：重建一个既浪费连接，
+        # 也让测试没法注入假模型
+        llm=ctx.llm,
+        session=None,  # 子 agent 的对话不落主会话文件
+        undo=ctx.undo,  # 共用撤销栈，否则它改的文件 /undo 撤不掉
+        extra_instructions=system_prompt,
+        plan_board=board,
+        agent_depth=ctx.depth + 1,
+    )
+
+    brief = task
+    if context.strip():
+        brief = f"【背景】\n{context.strip()}\n\n【任务】\n{task}"
+
+    answer = child.run(brief)
+
+    tools_used = sorted(
+        {
+            call["function"]["name"]
+            for message in child.messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+            for call in message["tool_calls"]
+        }
+    )
+    steps = sum(
+        1 for m in child.messages if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    truncated = "步数上限" in answer
+
+    return (
+        DelegateReport(
+            ok=bool(answer.strip()),
+            text=answer,
+            steps=steps,
+            tools_used=tools_used,
+            truncated=truncated,
+        ),
+        tag,
+    )
+
+
+# --------------------------------------------------------------------- 工具
 
 
 class Delegate(Tool):
@@ -86,7 +180,7 @@ class Delegate(Tool):
         "把一块自成一体的子任务交给独立上下文的子 agent，只拿回它的结论。\n"
         "适合：\n"
         "  · 探索性调研——「这个报错是从哪抛出来的」，过程很长但结论很短；\n"
-        "  · 独立审查——换一个干净上下文看你的改动，不会带着你刚才的思路；\n"
+        "  · 独立审查——换一个干净上下文看你的改动（也可以用更专门的 review_changes）；\n"
         "  · 任何「翻很多文件、只要一个答案」的活。\n"
         "子 agent **看不到你的对话**，所以任务描述必须自包含：写清楚背景、"
         "要它在哪些文件/目录里找、期望的结论形式。\n"
@@ -123,8 +217,6 @@ class Delegate(Tool):
     def __init__(self, ctx: AgentContext) -> None:
         self.ctx = ctx
 
-    # ------------------------------------------------------------------ 执行
-
     def run(
         self,
         task: str,
@@ -146,86 +238,10 @@ class Delegate(Tool):
                 f"不要再往下派。"
             )
 
-        child = self._spawn(text, mode, context, max_steps)
-        label = self._label(text)
-        return child.summary(label, mode)
-
-    # ------------------------------------------------------------------ 内部
-
-    @staticmethod
-    def _label(task: str) -> str:
-        return preview(task, 24)
-
-    def _child_registry(self, mode: str, board: Any):
-        from . import build_registry, filter_registry
-
-        registry = build_registry(self.ctx.workspace, cfg=self.ctx.cfg, plan_board=board)
-        allowed = READ_ONLY_TOOLS + (WRITE_EXTRA_TOOLS if mode == "write" else ())
-        # 只读列表里没提到的（git_push、git_init、delegate 自身）一律不给
-        return filter_registry(registry, only=set(allowed))
-
-    def _spawn(self, task: str, mode: str, context: str, max_steps: int) -> DelegateReport:
-        from ..loop import Agent
-        from ..plan import PlanBoard
-
-        if self.ctx.ui is None:
-            raise ToolError("内部错误：子 agent 没有 UI 可用。")
-
-        board = PlanBoard()
-        registry = self._child_registry(mode, board)
-
-        child_ui = SubagentUI(self.ctx.workspace, self.ctx.ui, self._label(task))
-        child_cfg = self.ctx.cfg
-        if child_cfg is None:
-            raise ToolError("内部错误：子 agent 缺少配置。")
-
-        # 继承父 agent 的步数上限设置，但按委派要求收紧
-        import dataclasses
-
-        child_cfg = dataclasses.replace(
-            child_cfg, max_iterations=max(1, min(int(max_steps), 60))
+        report, label = spawn_subagent(
+            self.ctx, task=text, mode=mode, context=context, max_steps=max_steps
         )
-
-        child = Agent(
-            child_cfg,
-            child_ui,
-            workspace=self.ctx.workspace,
-            registry=registry,
-            # 复用父 agent 的客户端实例：重建一个既浪费连接，
-            # 也让测试没法注入假模型
-            llm=self.ctx.llm,
-            session=None,  # 子 agent 的对话不落主会话文件
-            undo=self.ctx.undo,  # 共用撤销栈，否则它改的文件 /undo 撤不掉
-            extra_instructions=SUBAGENT_SYSTEM,
-            plan_board=board,
-            agent_depth=self.ctx.depth + 1,
-        )
-
-        brief = task
-        if context.strip():
-            brief = f"【背景】\n{context.strip()}\n\n【任务】\n{task}"
-
-        answer = child.run(brief)
-        tools_used = sorted(
-            {
-                call["function"]["name"]
-                for message in child.messages
-                if message.get("role") == "assistant" and message.get("tool_calls")
-                for call in message["tool_calls"]
-            }
-        )
-        steps = sum(
-            1 for m in child.messages if m.get("role") == "assistant" and m.get("tool_calls")
-        )
-        truncated = "已达步数上限" in answer or "[已达步数上限]" in answer
-
-        return DelegateReport(
-            ok=bool(answer.strip()),
-            text=answer,
-            steps=steps,
-            tools_used=tools_used,
-            truncated=truncated,
-        )
+        return report.summary(label, mode)
 
 
 class SubagentUI:
@@ -274,7 +290,9 @@ class SubagentUI:
 
     # ------------------------------------------------------------- 交互类
 
-    def confirm(self, tool_name: str, args: dict, detail: str, preview_text: str | None = None) -> bool:
+    def confirm(
+        self, tool_name: str, args: dict, detail: str, preview_text: str | None = None
+    ) -> bool:
         return self.parent.confirm(tool_name, args, detail, preview_text)
 
     def info(self, text: str) -> None:

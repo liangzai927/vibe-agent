@@ -14,6 +14,7 @@ from .fs import EditFile, ListDir, ReadFile, WriteFile
 from .git import GIT_TOOLS
 from .plan import UpdatePlan
 from .render import RENDER_TOOLS
+from .review import REVIEW_TOOLS, ReviewChanges
 from .search import Glob, Grep
 from .shell import RunBash
 
@@ -39,6 +40,8 @@ __all__ = [
     "DOCUMENT_TOOLS",
     "DESIGN_TOOLS",
     "DELEGATE_TOOLS",
+    "REVIEW_TOOLS",
+    "ReviewChanges",
 ]
 
 CORE_TOOLS = (ReadFile, WriteFile, EditFile, ListDir, Glob, Grep, RunBash)
@@ -77,6 +80,7 @@ def build_registry(
     if ctx is not None and ctx.can_delegate():
         for tool_cls in DELEGATE_TOOLS:
             registry.register(tool_cls(ctx))
+        registry.register(ReviewChanges(ctx))
 
     return registry
 

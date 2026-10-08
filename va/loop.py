@@ -26,6 +26,7 @@ from .session import SessionStore
 from .tools import Registry, build_registry, safe_run
 from .tools.context import AgentContext
 from .tools.delegate import Delegate
+from .tools.review import ReviewChanges
 from .tools.plan import UpdatePlan
 from .ui import UI
 from .util import preview, red
@@ -88,8 +89,10 @@ class Agent:
             self.registry.register(UpdatePlan(self.plan_board))
             if self.agent_ctx.can_delegate():
                 self.registry.register(Delegate(self.agent_ctx))
+                self.registry.register(ReviewChanges(self.agent_ctx))
             else:
                 self.registry.unregister("delegate")
+                self.registry.unregister("review_changes")
 
         self.messages: list[dict[str, Any]] = [self._system_message()]
         if history:
