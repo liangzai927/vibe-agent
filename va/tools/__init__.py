@@ -12,6 +12,7 @@ from .design import DESIGN_TOOLS
 from .document import DOCUMENT_TOOLS
 from .fs import EditFile, ListDir, ReadFile, WriteFile
 from .git import GIT_TOOLS
+from .inspect import INSPECT_TOOLS, InspectImage
 from .plan import UpdatePlan
 from .render import RENDER_TOOLS
 from .review import REVIEW_TOOLS, ReviewChanges
@@ -39,6 +40,8 @@ __all__ = [
     "RENDER_TOOLS",
     "DOCUMENT_TOOLS",
     "DESIGN_TOOLS",
+    "INSPECT_TOOLS",
+    "InspectImage",
     "DELEGATE_TOOLS",
     "REVIEW_TOOLS",
     "ReviewChanges",
@@ -69,6 +72,8 @@ def build_registry(
             registry.register(tool_cls(workspace))
     if include_render:
         for tool_cls in RENDER_TOOLS:
+            registry.register(tool_cls(workspace, cfg))
+        for tool_cls in INSPECT_TOOLS:
             registry.register(tool_cls(workspace, cfg))
         for tool_cls in DESIGN_TOOLS:
             registry.register(tool_cls(workspace, cfg))

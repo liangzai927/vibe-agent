@@ -32,6 +32,7 @@ READ_ONLY_TOOLS = (
     "read_document",
     "read_design",
     "pixel_diff",
+    "inspect_image",
     "render_page",
     "git_status",
     "git_diff",

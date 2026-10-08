@@ -204,3 +204,112 @@ def pixel_diff(
         resized=resized,
         heatmap=heatmap_path,
     )
+
+
+# --------------------------------------------------------------- 无模型解析
+
+
+@dataclass
+class ImageReport:
+    """不借助任何模型，直接从像素里读出来的信息。
+
+    为什么需要它：主模型往往不支持读图，而「配一个多模态模型」对很多人来说
+    是额外成本。但设计稿里有一大半信息是**纯像素统计就能拿到**的——
+    画布尺寸、主色（hex）、各个区块的位置和大小。这些恰好就是写 CSS 最需要的。
+    """
+
+    width: int
+    height: int
+    image_format: str
+    mode: str
+    size_bytes: int
+    cols: int
+    rows: int
+    palette: list[tuple[str, float]]  # (hex, 占比)
+    grid: list[list[str]]  # 每格的主导色 hex
+    background: str
+    content_box: tuple[int, int, int, int] | None  # 内容区的像素边界
+    samples: int
+
+
+def _hex(rgb: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def _quantize(rgb: tuple[int, int, int], step: int = 16) -> tuple[int, int, int]:
+    """把相近的颜色并到一起。抗锯齿和压缩噪声会让同一种颜色散成几十个值。"""
+    return tuple(min(255, (channel + step // 2) // step * step) for channel in rgb)  # type: ignore[return-value]
+
+
+def inspect_image(
+    path: str | Path,
+    *,
+    cols: int = 20,
+    rows: int = 12,
+    palette_size: int = 8,
+) -> ImageReport:
+    """纯像素统计：尺寸、主色、粗粒度布局。完全不需要模型。"""
+    Image = _image()
+
+    target = Path(path)
+    if not target.is_file():
+        raise FileNotFoundError(f"图片不存在：{target}")
+
+    cols = max(4, min(int(cols), 80))
+    rows = max(3, min(int(rows), 60))
+
+    with Image.open(target) as handle:
+        image_format = handle.format or "?"
+        mode = handle.mode
+        width, height = handle.size
+        # BOX 滤波器下采样 = 每格取区域均值，正好是我们要的
+        grid_image = handle.convert("RGB").resize((cols, rows), Image.BOX)
+        # 用 tobytes 而不是 getdata：后者在 Pillow 14 会被移除
+        raw = grid_image.tobytes()
+
+    pixels = [(raw[i], raw[i + 1], raw[i + 2]) for i in range(0, len(raw), 3)]
+
+    cells = [
+        [_quantize(pixels[row * cols + col]) for col in range(cols)] for row in range(rows)
+    ]
+
+    # 主色按出现次数排序。网格只有几百格，够用了。
+    counts: dict[tuple[int, int, int], int] = {}
+    for row in cells:
+        for color in row:
+            counts[color] = counts.get(color, 0) + 1
+    total = cols * rows
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    palette = [(_hex(color), count / total) for color, count in ranked[:palette_size]]
+
+    background = _hex(ranked[0][0]) if ranked else "#000000"
+    background_rgb = ranked[0][0] if ranked else (0, 0, 0)
+
+    # 内容区：偏离背景色的格子构成的包围盒。用来估卡片的位置和大小。
+    content_box = None
+    hit_rows = [r for r, row in enumerate(cells) if any(c != background_rgb for c in row)]
+    hit_cols = [
+        c for c in range(cols) if any(cells[r][c] != background_rgb for r in range(rows))
+    ]
+    if hit_rows and hit_cols:
+        content_box = (
+            int(min(hit_cols) / cols * width),
+            int(min(hit_rows) / rows * height),
+            int((max(hit_cols) + 1) / cols * width),
+            int((max(hit_rows) + 1) / rows * height),
+        )
+
+    return ImageReport(
+        width=width,
+        height=height,
+        image_format=image_format,
+        mode=mode,
+        size_bytes=target.stat().st_size,
+        cols=cols,
+        rows=rows,
+        palette=palette,
+        grid=[[_hex(c) for c in row] for row in cells],
+        background=background,
+        content_box=content_box,
+        samples=total,
+    )
