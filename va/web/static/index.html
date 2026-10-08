@@ -34,6 +34,14 @@
     font-size: 12px; padding: 2px 10px; border-radius: 999px;
     border: 1px solid var(--border); color: var(--muted);
   }
+  .picker { display: flex; align-items: center; }
+  .picker select {
+    font: inherit; font-size: 12px; font-family: var(--mono);
+    color: var(--text); background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 8px; cursor: pointer; max-width: 320px;
+  }
+  .picker select:focus { outline: none; border-color: var(--accent); }
   .pill.busy { color: var(--yellow); border-color: #5c4a1a; }
   .pill.ready { color: var(--green); border-color: #1f4d2b; }
   button {
@@ -178,6 +186,9 @@
   <div class="brand">vibe<span>-agent</span></div>
   <div class="meta" id="head-meta"></div>
   <div class="spacer"></div>
+  <label class="picker" title="切换主模型（会写进 .env，下次启动还是它）">
+    <select id="model"></select>
+  </label>
   <div class="pill" id="status">连接中…</div>
   <button id="btn-help" title="显示命令">/help</button>
 </header>
@@ -496,10 +507,70 @@ function handle(ev) {
     case "approval":      renderApproval(ev); break;
     case "approval_done": break;
     case "task_end":      closeStream(); setStatus(false); break;
+    case "model":         loadModels(); break;
   }
 }
 
 // ---------------------------------------------------------------- SSE
+
+async function loadModels() {
+  const select = $("model");
+  try {
+    const data = await fetch("/api/models").then((r) => r.json());
+    select.innerHTML = "";
+
+    const known = data.catalog || [];
+    const ids = known.map((m) => m.id);
+    // 当前模型可能不在清单里（服务商不列别名），但必须能选到它
+    if (data.current && !ids.includes(data.current)) {
+      known.unshift({ id: data.current, summary: "当前使用", supports_image: false });
+    }
+    if (!known.length) {
+      const option = document.createElement("option");
+      option.textContent = data.current || "（未配置）";
+      option.value = data.current || "";
+      select.appendChild(option);
+      select.disabled = true;
+      return;
+    }
+
+    for (const model of known) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      const tags = [];
+      if (model.id === data.current) tags.push("当前");
+      if (model.id === data.vision) tags.push("视觉");
+      else if (model.supports_image) tags.push("可读图");
+      option.textContent = model.id + (tags.length ? "  · " + tags.join("/") : "");
+      option.title = model.summary || "";
+      if (model.id === data.current) option.selected = true;
+      select.appendChild(option);
+    }
+  } catch (err) {
+    select.disabled = true;
+  }
+}
+
+$("model").addEventListener("change", async (e) => {
+  const name = e.target.value;
+  if (!name) return;
+  e.target.disabled = true;
+  try {
+    const res = await fetch("/api/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json();
+    if (data.ok) pushNote("success", `已切换到 ${name}`);
+    else pushNote("error", data.error || "切换失败");
+  } catch (err) {
+    pushNote("error", "切换失败：" + err);
+  } finally {
+    e.target.disabled = false;
+    loadModels();
+  }
+});
 
 function setStatus(busy) {
   const el = $("status");
@@ -668,6 +739,7 @@ input.addEventListener("paste", (e) => {
 });
 
 // ---------------------------------------------------------------- 启动
+loadModels();
 connect();
 input.focus();
 </script>

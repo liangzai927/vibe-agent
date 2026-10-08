@@ -34,6 +34,7 @@ from ..workspace import Workspace
 from .bridge import ApprovalGate, EventBus, WebUI
 
 ASSETS = Path(__file__).resolve().parent / "static"
+AGENT_DIR = Path(__file__).resolve().parents[2]
 
 # 前端能用的命令。和终端那套是同一批动作，只是入口不同。
 HELP_TEXT = """可用命令：
@@ -61,6 +62,8 @@ class WebApp:
         plan=None,
         llm=None,
         registry=None,
+        env_path: Path | None = None,
+        models_dir: Path | None = None,
     ) -> None:
         self.cfg = cfg
         self.workspace = workspace
@@ -87,6 +90,42 @@ class WebApp:
         self._task_lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self.started_at = time.time()
+        self.env_path = env_path or (AGENT_DIR / ".env")
+        # 和 env_path 一样可以重定向。测试必须能把这些指到临时目录去——
+        # 不然「跑一次测试」就会把开发者真实的配置和模型缓存冲掉。
+        self.models_dir = models_dir or AGENT_DIR
+
+    # ------------------------------------------------------------- 模型
+
+    def models(self) -> dict[str, Any]:
+        from ..models import load_catalog
+
+        catalog = load_catalog(self.models_dir)
+        return {
+            "current": self.cfg.model,
+            "vision": self.cfg.vision_model,
+            "catalog": [
+                {
+                    "id": m.id,
+                    "summary": m.summary,
+                    "supports_image": m.supports_image,
+                    "context_window": m.context_window,
+                }
+                for m in (catalog.models if catalog else [])
+            ],
+            "fetched_at": catalog.fetched_at if catalog else 0,
+        }
+
+    def switch_model(self, name: str) -> None:
+        """切换主模型并持久化。下次启动还是它。"""
+        from ..config import write_env_values
+
+        self.agent.set_model(name)
+        try:
+            write_env_values(self.env_path, {"VA_MODEL": name})
+        except OSError:
+            pass  # 写不进去不影响本次会话
+        self.bus.publish("model", name=name)
 
     # ------------------------------------------------------------- 状态
 
@@ -283,6 +322,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/state":
             self._json(self.app.state())
             return
+        if parsed.path == "/api/models":
+            self._json(self.app.models())
+            return
+
         if parsed.path == "/api/raw":
             # 缩略图预览要用。走 Workspace 解析路径，天然被沙箱约束住，
             # 不会因为一个 ../ 就把工作区外的文件读出去。
@@ -351,6 +394,16 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._body()
             ok, message = self.app.submit(str(payload.get("text", "")))
             self._json({"ok": ok, "message": message}, 200 if ok else 409)
+            return
+
+        if parsed.path == "/api/model":
+            payload = self._body()
+            name = str(payload.get("name", "")).strip()
+            if not name:
+                self._json({"ok": False, "error": "没有指定模型"}, 400)
+                return
+            self.app.switch_model(name)
+            self._json({"ok": True, "model": name})
             return
 
         if parsed.path == "/api/approve":

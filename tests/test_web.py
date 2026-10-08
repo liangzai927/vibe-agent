@@ -20,8 +20,10 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(ROOT))
 
 from helpers import AgentTestCase, ScriptedLLM, tc, turn  # noqa: E402
 from va.config import Config  # noqa: E402
@@ -628,6 +630,104 @@ class TestHTTPSurface(AgentTestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.server.get("/../server.py")
         self.assertEqual(ctx.exception.code, 404)
+
+
+def _fingerprint(path: Path):
+    return (path.exists(), path.read_bytes() if path.exists() else None)
+
+
+# 真实的配置和模型缓存。这个模块里的任何测试都不许改动它们。
+# 之前就是因为直接往真实目录写，把开发者的 .models.json 冲掉过一次。
+_REAL_CONFIG = (ROOT / ".env", ROOT / ".models.json")
+_REAL_BEFORE = None
+
+
+def setUpModule() -> None:
+    global _REAL_BEFORE
+    _REAL_BEFORE = [_fingerprint(p) for p in _REAL_CONFIG]
+
+
+def tearDownModule() -> None:
+    after = [_fingerprint(p) for p in _REAL_CONFIG]
+    if after != _REAL_BEFORE:
+        raise AssertionError(
+            "web 测试改动了项目根目录下的真实配置（.env / .models.json）！\n"
+            "测试必须把 env_path 和 models_dir 指向临时目录。"
+        )
+
+
+class TestModelSwitching(AgentTestCase):
+    """界面上换模型必须真的持久化，否则重启就变回去了。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.env_path = self.root / ".env"
+        self.env_path.write_text("VA_MODEL=old\nVA_API_KEY=sk-x\n", encoding="utf-8")
+        self.catalog_dir = self.root / "agent-config"
+        self.catalog_dir.mkdir(exist_ok=True)
+        self.app = WebApp(
+            self.cfg,
+            self.workspace,
+            llm=ScriptedLLM(turn("x")),
+            registry=build_registry(self.workspace),
+            env_path=self.env_path,
+            models_dir=self.catalog_dir,
+        )
+        self.server = ServerFixture(self.app)
+
+    def tearDown(self) -> None:
+        self.server.stop()
+        super().tearDown()
+
+    def read_env(self) -> str:
+        return self.env_path.read_text(encoding="utf-8")
+
+    def test_models_endpoint_lists_the_catalog(self):
+        from va.models import ModelCatalog, ModelInfo, save_catalog
+
+        save_catalog(
+            self.catalog_dir,
+            ModelCatalog(
+                base_url="x",
+                models=[
+                    ModelInfo(id="seer", input_modalities=["text", "image"]),
+                    ModelInfo(id="blind"),
+                ],
+            ),
+        )
+        status, body, _ = self.server.get("/api/models")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertIn(data["current"], ["seer", "blind", "fake"])
+        ids = [m["id"] for m in data["catalog"]]
+        self.assertIn("seer", ids)
+        seer = next(m for m in data["catalog"] if m["id"] == "seer")
+        self.assertTrue(seer["supports_image"])
+
+    def test_switch_updates_agent_and_env(self):
+        status, data = self.server.post("/api/model", {"name": "brand-new"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(self.app.agent.cfg.model, "brand-new")
+        self.assertIn("VA_MODEL=brand-new", self.read_env())
+
+    def test_switch_keeps_other_env_keys(self):
+        self.server.post("/api/model", {"name": "x"})
+        self.assertIn("VA_API_KEY=sk-x", self.read_env(), "换模型不该冲掉别的配置")
+
+    def test_switch_publishes_an_event(self):
+        self.server.post("/api/model", {"name": "notify-me"})
+        events = [e for e in self.app.bus.since(0) if e["type"] == "model"]
+        self.assertEqual(events[0]["name"], "notify-me")
+
+    def test_empty_name_is_rejected(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.server.post("/api/model", {"name": "  "})
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_switch_goes_through_the_slash_command_too(self):
+        self.app.submit("/model via-command")
+        self.assertEqual(self.app.agent.cfg.model, "via-command")
 
 
 class TestSSE(AgentTestCase):
