@@ -11,7 +11,7 @@ WORKSPACE ?= $(CURDIR)
 IMAGE ?= vibe-agent:latest
 
 .DEFAULT_GOAL := help
-.PHONY: help venv install install-browser test test-full doctor run fmt clean \
+.PHONY: help venv install install-browser install-dev test test-full doctor run fmt clean \
         docker-build docker-build-slim docker-run docker-shell docker-doctor \
         docker-test compose-up compose-run compose-doctor
 
@@ -22,6 +22,8 @@ help:  ## 显示所有可用目标
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
+
+.PHONY: install-dev
 
 # ------------------------------------------------------------------ 本地
 
@@ -35,10 +37,13 @@ install: venv  ## 安装核心依赖
 install-browser: install  ## 安装可选依赖（渲染 / 像素对比）
 	$(VENV_PY) -m pip install -r requirements-browser.txt
 
+install-dev: venv  ## 安装全部依赖，测试零跳过
+	$(VENV_PY) -m pip install -r requirements-dev.txt
+
 test:  ## 跑测试（用系统 python，缺可选依赖的用例会跳过）
 	$(PYTHON) -m unittest discover -s tests
 
-test-full: install-browser  ## 跑全部测试（含真渲染）
+test-full: install-dev  ## 跑全部测试（含真渲染，零跳过）
 	$(VENV_PY) -m unittest discover -s tests
 
 doctor:  ## 环境自检

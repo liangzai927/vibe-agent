@@ -304,15 +304,16 @@ unified diff 摆给用户看。旧做法是把 `old_string` / `new_string` 两�
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v     # 用现有环境，缺依赖的用例会跳过
+make test-full                                # 装齐依赖后跑，零跳过
 ```
 
-175 个测试，**不需要 API key**。缺可选依赖的用例会优雅跳过而不是变红——
-所以同一个套件在「只有核心依赖」和「装了全部依赖」的环境下都能跑：
+208 个测试，**不需要 API key**。缺可选依赖的用例会优雅跳过而不是变红——
+同一个套件在「只有核心依赖」和「装了全部依赖」的环境下都能跑：
 
 ```
-系统 python（仅核心）      175 tests, OK (skipped=14)
-venv（含 playwright/Pillow） 175 tests, OK (skipped=1)
+系统 python（仅核心）         208 tests, OK (skipped=14)
+venv（playwright+Pillow+pyyaml）208 tests, OK (skipped=1)
 ```
 
 | 文件 | 覆盖 |
@@ -324,6 +325,24 @@ venv（含 playwright/Pillow） 175 tests, OK (skipped=1)
 | `test_session.py` | 追加写、压缩重放、残缺行容错、跨进程恢复、恢复时的过期提醒 |
 | `test_render.py` | URL 解析、缺依赖的报错文案、真渲染截图、控制台报错捕获、元素截图、像素对比阈值 |
 | `test_environment.py` | 自检报告聚合、各项检查、浏览器候选优先级与去重、缺依赖提示 |
+| `test_docker.py` | 容器配置一致性（见下） |
+
+### 为什么给容器配置写测试
+
+本机没装 Docker，镜像从没被真正构建过。但容器化事故绝大多数来自**不一致**
+而不是复杂逻辑，而不一致是能在本地断言的：
+
+- Dockerfile `COPY` 了不存在的文件 → 构建到一半才炸
+- `.dockerignore` 忘了排除 `.env` → 密钥被烤进镜像层
+- `.dockerignore` 忘了排除 `.venv` → 宿主机二进制被带进 Linux 镜像
+- **代码读了某个 `VA_*` 变量，compose 却没透传** → 「本地能跑、容器里怎么都不生效」
+- entrypoint 没有可执行位 → 容器以 126 退出
+- 关键步骤被 `|| true` 吞掉 → 现象和真因对不上
+
+最后那条环境变量一致性检查是真的扫描源码：Python 里的 `os.environ.get(...)`
+加上 shell 里的 `${VAR:-默认}`，再和 compose 的 `environment` 列表做差集。
+它当场就抓到了一个真实遗漏——`config.py` 支持 `OPENAI_API_KEY` /
+`DEEPSEEK_API_KEY` 作为兜底，compose 却只透传了 `VA_API_KEY`。
 
 ---
 

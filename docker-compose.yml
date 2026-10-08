@@ -38,8 +38,13 @@ services:
 
     environment:
       # ---- 模型 ----
+      # VA_* 是首选；下面三个别名是 config.py 支持的兜底，
+      # 一起透传才能保证「本地怎么配、容器里就怎么生效」
       - VA_API_KEY
+      - OPENAI_API_KEY
+      - DEEPSEEK_API_KEY
       - VA_BASE_URL
+      - OPENAI_BASE_URL
       - VA_MODEL
       - VA_TEMPERATURE
       - VA_MAX_ITERATIONS
