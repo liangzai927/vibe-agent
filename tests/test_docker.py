@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -189,6 +191,86 @@ class TestEntrypoint(unittest.TestCase):
                 continue
             if "pip install" in stripped or "playwright install" in stripped:
                 self.assertNotIn("|| true", stripped, f"关键步骤被吞掉：{stripped}")
+
+
+class TestEntrypointExecution(unittest.TestCase):
+    """真的把 entrypoint 跑起来。
+
+    本机不是 Linux 也不是 root，走不到 UID 对齐那段分支；但「非 root 时会不会
+    崩」「缺依赖时是报错还是优雅跳过」这些控制流是可以实测的，而且恰恰是最容易
+    写错的地方。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name)
+        self.workspace = base / "workspace"
+        self.home = base / "home"
+        self.home.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, *args: str, workspace: Path | None = None, **extra_env: str):
+        env = {
+            **os.environ,
+            "VA_WORKSPACE": str(workspace or self.workspace),
+            "HOME": str(self.home),
+            # 别去改开发机的全局 git 配置
+            "VA_GIT_SAFE_DIRECTORY": "0",
+            **extra_env,
+        }
+        return subprocess.run(
+            ["bash", str(ENTRYPOINT), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+
+    def test_executes_the_command(self):
+        result = self._run("bash", "-c", "echo 来自容器内部")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("来自容器内部", result.stdout)
+
+    def test_creates_workspace_when_missing(self):
+        self.assertFalse(self.workspace.exists())
+        self._run("true")
+        self.assertTrue(self.workspace.is_dir(), "VA_WORKSPACE 不存在时应自动创建")
+
+    def test_browser_install_without_root_is_skipped_not_fatal(self):
+        """非 root 时装不了系统库——要提示，但不能因此整个容器起不来。"""
+        result = self._run("bash", "-c", "echo 仍然继续执行", VA_INSTALL_BROWSER="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("仍然继续执行", result.stdout)
+        self.assertIn("需要以 root 启动", result.stderr)
+
+    def test_warns_when_git_identity_is_missing(self):
+        """容器里没有开发机的 ~/.gitconfig，不提就等着 agent 提交时才失败。"""
+        result = self._run("true")
+        self.assertIn("git 身份", result.stderr)
+        self.assertIn("GIT_USER_EMAIL", result.stderr)
+
+    def test_no_warning_when_git_identity_is_provided(self):
+        result = self._run("true", GIT_USER_NAME="测试", GIT_USER_EMAIL="t@example.com")
+        self.assertNotIn("没配 git 身份", result.stderr)
+        # 应该真的写进了容器内的全局配置
+        configured = subprocess.run(
+            ["git", "config", "--global", "user.email"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "HOME": str(self.home)},
+        )
+        self.assertEqual(configured.stdout.strip(), "t@example.com")
+
+    def test_safe_directory_is_written_when_enabled(self):
+        result = self._run(
+            "true", workspace=self.workspace, VA_GIT_SAFE_DIRECTORY="1"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = (self.home / ".gitconfig").read_text(encoding="utf-8")
+        self.assertIn("safe", config)
+        self.assertIn("*", config)
 
 
 class TestDockerignore(unittest.TestCase):
