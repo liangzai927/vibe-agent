@@ -1,0 +1,563 @@
+"""冒烟测试：用脚本化的假 LLM 驱动真实的工具与主循环，不需要 API key。
+
+运行：python3 -m unittest discover -s tests -v
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from va.config import Config  # noqa: E402
+from va.loop import Agent  # noqa: E402
+from va.messages import AssistantTurn, ToolCall  # noqa: E402
+from va.tools import build_registry  # noqa: E402
+from va.ui import UI  # noqa: E402
+from va.workspace import Workspace, WorkspaceError  # noqa: E402
+
+_counter = 0
+
+
+def tc(tool_name: str, **args) -> ToolCall:
+    """构造一个工具调用。"""
+    global _counter
+    _counter += 1
+    return ToolCall(
+        id=f"call_{_counter}",
+        name=tool_name,
+        arguments=json.dumps(args, ensure_ascii=False),
+    )
+
+
+def turn(content: str = "", *calls: ToolCall) -> AssistantTurn:
+    return AssistantTurn(content=content, tool_calls=list(calls), finish_reason="stop")
+
+
+class ScriptedLLM:
+    """按剧本返回预设轮次，并记录每次收到的消息。
+
+    压缩上下文时主循环会发起一次「不带工具」的摘要请求；
+    这里把它识别出来并返回固定摘要，不消耗剧本轮次。
+    """
+
+    def __init__(self, *turns: AssistantTurn) -> None:
+        self.turns = list(turns)
+        self.received: list[list[dict]] = []
+        self.summaries = 0
+
+    def complete(self, messages, tools=None, on_text=None, on_reasoning=None):
+        self.received.append([dict(m) for m in messages])
+        if tools is None and len(messages) == 1 and "压缩成结构化摘要" in str(messages[0].get("content", "")):
+            self.summaries += 1
+            return turn(f"[压缩摘要 #{self.summaries}] 早前完成了若干步骤。")
+        if not self.turns:
+            return turn("(剧本已用尽)")
+        nxt = self.turns.pop(0)
+        if on_text and nxt.content:
+            on_text(nxt.content)
+        return nxt
+
+
+class QuietUI(UI):
+    """测试用 UI：不打印、不询问。"""
+
+    def __init__(self, workspace, approve=True):
+        super().__init__(workspace, auto_approve=approve, show_thinking=False)
+        self.denied: list[str] = []
+
+    def confirm(self, tool_name, args, detail):
+        if self.auto_approve:
+            return True
+        self.denied.append(tool_name)
+        return False
+
+    def tool_result(self, text, ok):  # 收集结果方便断言
+        self.last_result = text
+        self.last_ok = ok
+
+    def tool_call(self, *a, **k):
+        pass
+
+    def assistant_header(self, *a, **k):
+        pass
+
+    def stream_text(self, *a, **k):
+        pass
+
+    def info(self, *a, **k):
+        pass
+
+    def success(self, *a, **k):
+        pass
+
+
+class AgentTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.cfg = Config(
+            workspace=self.root,
+            model="fake",
+            api_key="fake",
+            base_url="http://localhost/v1",
+        )
+        self.workspace = Workspace(self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def make_agent(self, llm: ScriptedLLM, *, approve: bool = True):
+        ui = QuietUI(self.workspace, approve=approve)
+        agent = Agent(
+            self.cfg,
+            ui,
+            workspace=self.workspace,
+            registry=build_registry(self.workspace),
+            llm=llm,  # type: ignore[arg-type]
+        )
+        return agent, ui
+
+
+# --------------------------------------------------------------------- 基础
+
+
+class TestBasics(AgentTestCase):
+    def test_direct_answer_without_tools(self):
+        llm = ScriptedLLM(turn("你好，我是 agent。"))
+        agent, _ = self.make_agent(llm)
+        self.assertEqual(agent.run("打个招呼"), "你好，我是 agent。")
+        self.assertEqual(len(llm.received), 1)
+
+    def test_system_prompt_contains_workspace(self):
+        llm = ScriptedLLM(turn("ok"))
+        agent, _ = self.make_agent(llm)
+        agent.run("hi")
+        system = llm.received[0][0]
+        self.assertEqual(system["role"], "system")
+        self.assertIn(str(self.root), system["content"])
+        self.assertIn("run_bash", system["content"])
+
+    def test_tools_are_sent_to_model(self):
+        llm = ScriptedLLM(turn("ok"))
+        agent, _ = self.make_agent(llm)
+        captured = {}
+        original = llm.complete
+
+        def spy(messages, tools=None, **kw):
+            captured["tools"] = tools
+            return original(messages, tools=tools, **kw)
+
+        llm.complete = spy  # type: ignore[assignment]
+        agent.run("hi")
+        names = {t["function"]["name"] for t in captured["tools"]}
+        self.assertIn("read_file", names)
+        self.assertIn("git_commit", names)
+
+
+# --------------------------------------------------------------------- 文件
+
+
+class TestFileTools(AgentTestCase):
+    def test_write_then_read_roundtrip(self):
+        llm = ScriptedLLM(
+            turn("", tc("write_file", path="src/hello.py", content="print('hi')\n")),
+            turn("", tc("read_file", path="src/hello.py")),
+            turn("搞定。"),
+        )
+        agent, _ = self.make_agent(llm)
+        answer = agent.run("创建 src/hello.py")
+
+        self.assertEqual(answer, "搞定。")
+        written = self.root / "src" / "hello.py"
+        self.assertTrue(written.is_file())
+        self.assertEqual(written.read_text(), "print('hi')\n")
+
+        # read_file 的结果应带行号回灌给模型
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("1\tprint('hi')", tool_msgs[-1]["content"])
+
+    def test_edit_file_exact_replace(self):
+        target = self.root / "app.py"
+        target.write_text("def main():\n    return 1\n")
+        llm = ScriptedLLM(
+            turn("", tc("edit_file", path="app.py", old_string="return 1", new_string="return 2")),
+            turn("改好了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("把返回值改成 2")
+        self.assertEqual(target.read_text(), "def main():\n    return 2\n")
+
+    def test_edit_file_reports_missing_match(self):
+        (self.root / "a.txt").write_text("hello\n")
+        llm = ScriptedLLM(
+            turn("", tc("edit_file", path="a.txt", old_string="not-there", new_string="x")),
+            turn("失败，我换个方式。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("改文件")
+
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("找不到 old_string", tool_msgs[0]["content"])
+
+    def test_edit_file_rejects_ambiguous_match(self):
+        (self.root / "b.txt").write_text("dup\ndup\n")
+        llm = ScriptedLLM(
+            turn("", tc("edit_file", path="b.txt", old_string="dup", new_string="x")),
+            turn("好的。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("改")
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("不唯一", tool_msgs[0]["content"])
+        self.assertEqual((self.root / "b.txt").read_text(), "dup\ndup\n")
+
+    def test_read_missing_file_is_graceful(self):
+        llm = ScriptedLLM(
+            turn("", tc("read_file", path="nope.py")),
+            turn("文件不存在。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("读文件")
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("不存在", tool_msgs[0]["content"])
+
+    def test_list_dir_and_glob_and_grep(self):
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "one.py").write_text("def alpha():\n    pass\n")
+        (self.root / "pkg" / "two.py").write_text("def beta():\n    pass\n")
+        (self.root / "readme.md").write_text("# doc\n")
+
+        llm = ScriptedLLM(
+            turn("", tc("glob", pattern="**/*.py")),
+            turn("", tc("grep", pattern=r"def \w+")),
+            turn("", tc("list_dir", path="pkg")),
+            turn("看完了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("看看项目")
+
+        outputs = [m["content"] for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("pkg/one.py", outputs[0])
+        self.assertIn("def alpha", outputs[1])
+        self.assertIn("one.py", outputs[2])
+
+
+# --------------------------------------------------------------------- 沙箱
+
+
+class TestSandbox(AgentTestCase):
+    def test_write_outside_workspace_blocked(self):
+        llm = ScriptedLLM(
+            turn("", tc("write_file", path="../../evil.txt", content="bad")),
+            turn("被挡住了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("越界写文件")
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("越界", tool_msgs[0]["content"])
+        self.assertFalse((self.root.parent.parent / "evil.txt").exists())
+
+    def test_absolute_path_outside_blocked(self):
+        llm = ScriptedLLM(
+            turn("", tc("read_file", path="/etc/hosts")),
+            turn("不行。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("读系统文件")
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("越界", tool_msgs[0]["content"])
+
+    def test_forbidden_command_blocked(self):
+        llm = ScriptedLLM(
+            turn("", tc("run_bash", command="rm -rf /")),
+            turn("被拒了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("删库")
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("安全策略拒绝", tool_msgs[0]["content"])
+
+
+# --------------------------------------------------------------------- 审批
+
+
+class TestApproval(AgentTestCase):
+    def test_denied_write_does_not_touch_disk(self):
+        llm = ScriptedLLM(
+            turn("", tc("write_file", path="x.txt", content="nope")),
+            turn("用户拒绝了，我不写了。"),
+        )
+        agent, ui = self.make_agent(llm, approve=False)
+        agent.run("写个文件")
+        self.assertFalse((self.root / "x.txt").exists())
+        self.assertIn("write_file", ui.denied)
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("用户拒绝", tool_msgs[0]["content"])
+
+    def test_read_does_not_require_approval(self):
+        (self.root / "a.txt").write_text("data\n")
+        llm = ScriptedLLM(turn("", tc("read_file", path="a.txt")), turn("读到了。"))
+        agent, ui = self.make_agent(llm, approve=False)
+        agent.run("读文件")
+        self.assertEqual(ui.denied, [])
+
+
+# --------------------------------------------------------------------- 容错
+
+
+class TestRobustness(AgentTestCase):
+    def test_unknown_tool_reports_options(self):
+        llm = ScriptedLLM(
+            turn("", ToolCall(id="c1", name="teleport", arguments="{}")),
+            turn("工具不存在。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("用不存在的工具")
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("不存在名为", tool_msgs[0]["content"])
+        self.assertIn("read_file", tool_msgs[0]["content"])
+
+    def test_bad_json_arguments_recovered(self):
+        llm = ScriptedLLM(
+            turn("", ToolCall(id="c1", name="read_file", arguments="{not json")),
+            turn("参数错了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("乱传参数")
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("JSON", tool_msgs[0]["content"])
+
+    def test_wrong_argument_name_is_graceful(self):
+        llm = ScriptedLLM(
+            turn("", tc("read_file", file="a.txt")),
+            turn("参数名错了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("传错参数名")
+        tool_msgs = [m for m in agent.messages if m["role"] == "tool"]
+        self.assertIn("参数不匹配", tool_msgs[0]["content"])
+
+    def test_tool_exception_does_not_crash_loop(self):
+        llm = ScriptedLLM(
+            turn("", tc("read_file", path=".")),  # 目录
+            turn("那是目录。"),
+        )
+        agent, _ = self.make_agent(llm)
+        answer = agent.run("读目录")
+        self.assertEqual(answer, "那是目录。")
+
+    def test_max_iterations_respected(self):
+        self.cfg.max_iterations = 3
+        llm = ScriptedLLM(*[turn("", tc("list_dir")) for _ in range(10)])
+        agent, _ = self.make_agent(llm)
+        answer = agent.run("无限循环")
+        self.assertIn("上限", answer)
+        self.assertEqual(len(llm.received), 3)
+
+
+# --------------------------------------------------------------------- shell
+
+
+class TestShell(AgentTestCase):
+    def test_run_bash_captures_output_and_exit_code(self):
+        llm = ScriptedLLM(
+            turn("", tc("run_bash", command="echo hello-agent")),
+            turn("命令跑通了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("跑个命令")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        self.assertIn("hello-agent", out)
+        self.assertIn("[exit code: 0]", out)
+
+    def test_run_bash_reports_failure(self):
+        llm = ScriptedLLM(
+            turn("", tc("run_bash", command="exit 3")),
+            turn("失败了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("失败命令")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        self.assertIn("[exit code: 3]", out)
+
+    def test_run_bash_cwd_confined(self):
+        llm = ScriptedLLM(
+            turn("", tc("run_bash", command="pwd", cwd="/tmp")),
+            turn("不行。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("换目录执行")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        self.assertIn("越界", out)
+
+
+# --------------------------------------------------------------------- 上下文
+
+
+class TestCompaction(AgentTestCase):
+    def test_compaction_preserves_system_and_recent(self):
+        self.cfg.context_budget = 100  # 极低，强制触发
+        filler = "x" * 400
+        llm = ScriptedLLM(
+            *[turn("", tc("run_bash", command=f"echo {filler}")) for _ in range(12)],
+            turn("完成。"),
+        )
+        agent, _ = self.make_agent(llm)
+        answer = agent.run("产生大量输出")
+
+        self.assertEqual(answer, "完成。")
+        self.assertGreater(agent.compactions, 0)
+        self.assertGreater(llm.summaries, 0, "压缩时应真的调用模型生成摘要")
+        # 系统提示词必须原样保留
+        self.assertEqual(agent.messages[0]["role"], "system")
+        self.assertIn(str(self.root), agent.messages[0]["content"])
+        # 第二段必须是 user 开头的摘要，且不能出现孤儿 tool 消息
+        self.assertEqual(agent.messages[1]["role"], "user")
+        self.assertIn("压缩摘要", agent.messages[1]["content"])
+
+    def test_no_orphan_tool_messages_after_compaction(self):
+        self.cfg.context_budget = 100
+        filler = "y" * 400
+        llm = ScriptedLLM(
+            *[turn("", tc("run_bash", command=f"echo {filler}")) for _ in range(14)],
+            turn("done"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("刷屏")
+        self.assertGreater(agent.compactions, 0)
+
+        seen_call_ids: set[str] = set()
+        for message in agent.messages:
+            if message["role"] == "assistant" and message.get("tool_calls"):
+                seen_call_ids |= {c["id"] for c in message["tool_calls"]}
+            elif message["role"] == "tool":
+                self.assertIn(
+                    message["tool_call_id"],
+                    seen_call_ids,
+                    "出现了没有对应 assistant 调用的 tool 消息",
+                )
+
+
+# --------------------------------------------------------------------- git
+
+
+class TestGitTools(AgentTestCase):
+    def _git_env(self) -> dict:
+        import os
+
+        return {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        }
+
+    def _init_repo(self, *, initial_commit: bool = True) -> None:
+        env = self._git_env()
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True, capture_output=True, env=env)
+        if initial_commit:
+            (self.root / ".gitkeep").write_text("")
+            subprocess.run(["git", "add", "-A"], cwd=self.root, check=True, capture_output=True, env=env)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "init"], cwd=self.root, check=True, capture_output=True, env=env
+            )
+
+    def _current_branch(self) -> str:
+        return subprocess.run(
+            ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            env=self._git_env(),
+        ).stdout.strip()
+
+    def test_git_status_and_commit(self):
+        self._init_repo()
+        (self.root / "f.txt").write_text("v1\n")
+        llm = ScriptedLLM(
+            turn("", tc("git_status")),
+            turn("", tc("git_commit", message="add f.txt")),
+            turn("提交完成。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("提交文件")
+
+        log = subprocess.run(
+            ["git", "log", "--oneline"], cwd=self.root, capture_output=True, text=True
+        ).stdout
+        self.assertIn("add f.txt", log)
+
+    def test_git_status_reports_branch_name(self):
+        self._init_repo()
+        llm = ScriptedLLM(turn("", tc("git_status")), turn("看完了。"))
+        agent, _ = self.make_agent(llm)
+        agent.run("查状态")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        self.assertIn("分支：", out)
+        self.assertNotIn("分支：HEAD", out)
+
+    def test_git_status_on_empty_repo_is_readable(self):
+        self._init_repo(initial_commit=False)
+        llm = ScriptedLLM(turn("", tc("git_status")), turn("还没提交过。"))
+        agent, _ = self.make_agent(llm)
+        agent.run("查状态")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        # 未提交的新仓库也应给出真实分支名，而不是 "HEAD"
+        self.assertIn("分支：main", out)
+        self.assertNotIn("分支：HEAD", out)
+
+    def test_git_create_branch(self):
+        self._init_repo()
+        llm = ScriptedLLM(
+            turn("", tc("git_create_branch", name="feat/demo")),
+            turn("分支建好了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("建分支")
+
+        self.assertEqual(self._current_branch(), "feat/demo")
+
+    def test_git_create_branch_switches_if_exists(self):
+        self._init_repo()
+        subprocess.run(["git", "branch", "existing"], cwd=self.root, check=True, env=self._git_env())
+        llm = ScriptedLLM(
+            turn("", tc("git_create_branch", name="existing")),
+            turn("切过去了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("切分支")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        self.assertIn("已存在", out)
+        self.assertEqual(self._current_branch(), "existing")
+
+    def test_git_push_without_remote_is_graceful(self):
+        self._init_repo()
+        llm = ScriptedLLM(
+            turn("", tc("git_push")),
+            turn("没有远端。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("推送")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        self.assertIn("远端", out)
+
+    def test_git_tool_outside_repo_is_graceful(self):
+        llm = ScriptedLLM(
+            turn("", tc("git_status")),
+            turn("不是仓库。"),
+        )
+        agent, _ = self.make_agent(llm)
+        agent.run("查状态")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        self.assertIn("不是一个 git 仓库", out)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
