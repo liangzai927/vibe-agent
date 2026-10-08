@@ -106,6 +106,9 @@ class SilentUI(UI):
     def error(self, *a, **k):
         pass
 
+    def show_plan(self, plan):
+        pass
+
 
 class QuietUI(SilentUI):
     """静音 UI + 审批记录。approve=False 时拒绝所有需要审批的操作。"""
@@ -141,7 +144,7 @@ class AgentTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def make_agent(self, llm, *, approve: bool = True, session=None, history=None, undo=None):
+    def make_agent(self, llm, *, approve: bool = True, session=None, history=None, undo=None, plan=None):
         ui = QuietUI(self.workspace, approve=approve)
         agent = Agent(
             self.cfg,
@@ -152,5 +155,6 @@ class AgentTestCase(unittest.TestCase):
             session=session,
             history=history,
             undo=undo,
+            plan=plan,
         )
         return agent, ui

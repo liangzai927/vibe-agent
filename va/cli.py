@@ -11,6 +11,7 @@ from .config import Config
 from .diffview import colorize, make_diff
 from .llm import LLM
 from .loop import Agent
+from .plan import Plan
 from .prompts import build_system_prompt
 from .session import SessionStore, git_head
 from .tools import build_registry
@@ -22,6 +23,7 @@ HELP = """可用命令：
   /help            显示这份帮助
   /tools           列出当前注册的工具
   /diff            查看本次会话至今所有文件改动（对比会话开始前）
+  /plan            查看当前任务计划
   /undo [N]        撤销最近 N 步的文件改动（默认 1 步）
   /checkpoints     列出可撤销的步骤
   /sessions        列出本项目的历史会话
@@ -142,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ui = UI(workspace, auto_approve=cfg.auto_approve, show_thinking=cfg.show_thinking)
 
-    session, history, resume_note = _open_session(args, workspace, cfg, ui)
+    session, history, resume_note, saved_plan = _open_session(args, workspace, cfg, ui)
 
     registry = build_registry(
         workspace, include_git=not args.no_git, include_render=not args.no_render, cfg=cfg
@@ -156,12 +158,15 @@ def main(argv: list[str] | None = None) -> int:
         session=session,
         history=history,
         extra_instructions=resume_note,
+        plan=Plan.from_dict(saved_plan) if saved_plan else None,
     )
 
     if resume_note:
         ui.warn(resume_note)
     if session is not None and history:
         ui.info(f"已恢复会话 {session.meta.id}（{len(history)} 条消息）")
+    if agent.plan is not None:
+        ui.info(f"已恢复任务计划：{agent.plan.goal}（{agent.plan.done_count}/{agent.plan.total}）")
 
     # 一次性任务模式
     if args.task:
@@ -186,10 +191,13 @@ def _open_session(
     workspace: Workspace,
     cfg: Config,
     ui: UI,
-) -> tuple[SessionStore | None, list[dict], str]:
-    """决定本次是新建会话还是恢复，并给出「历史可能已过时」的提示。"""
+) -> tuple[SessionStore | None, list[dict], str, dict | None]:
+    """决定本次是新建会话还是恢复。
+
+    返回 (会话存储, 历史消息, 可能过期的提示, 已保存的计划)。
+    """
     if args.no_session:
-        return None, [], ""
+        return None, [], "", None
 
     root = workspace.root
 
@@ -199,20 +207,20 @@ def _open_session(
         except FileNotFoundError as exc:
             print(red(f"{exc}"), file=sys.stderr)
             raise SystemExit(2)
-        meta, history = store.load()
-        return store, history, _staleness_note(meta, root)
+        meta, history, plan = store.load()
+        return store, history, _staleness_note(meta, root), plan
 
     if args.continue_:
         store = SessionStore.latest(root)
         if store is None:
             ui.warn("没有找到历史会话，已新建一个。")
             _warn_sessions_not_ignored(workspace, ui)
-            return SessionStore.create(root, cfg.model), [], ""
-        meta, history = store.load()
-        return store, history, _staleness_note(meta, root)
+            return SessionStore.create(root, cfg.model), [], "", None
+        meta, history, plan = store.load()
+        return store, history, _staleness_note(meta, root), plan
 
     _warn_sessions_not_ignored(workspace, ui)
-    return SessionStore.create(root, cfg.model), [], ""
+    return SessionStore.create(root, cfg.model), [], "", None
 
 
 def _warn_sessions_not_ignored(workspace: Workspace, ui: UI) -> None:
@@ -332,6 +340,15 @@ def _handle_command(raw: str, agent: Agent, ui: UI) -> bool:
 
     if command == "/checkpoints":
         _show_checkpoints(agent, ui)
+        return False
+
+    if command == "/plan":
+        plan = agent.plan
+        if plan is None:
+            ui.info("当前没有计划。多步任务里 agent 会自己用 update_plan 建。")
+        else:
+            ui.newline()
+            print(plan.render())
         return False
 
     if command == "/diff":

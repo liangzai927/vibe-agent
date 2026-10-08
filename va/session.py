@@ -124,7 +124,7 @@ class SessionStore:
         path = directory / f"{session_id}.jsonl"
         if not path.is_file():
             raise FileNotFoundError(f"找不到会话 {session_id}（{path}）")
-        meta, _ = cls.read(path)
+        meta, _, _ = cls.read(path)
         return cls(path, meta)
 
     @classmethod
@@ -135,7 +135,7 @@ class SessionStore:
         metas: list[SessionMeta] = []
         for path in sorted(directory.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
-                meta, _ = cls.read(path)
+                meta, _, _ = cls.read(path)
             except (OSError, ValueError):
                 continue
             metas.append(meta)
@@ -183,6 +183,14 @@ class SessionStore:
         self._append_raw({"type": "compact", "messages": payload, "ts": time.time()})
         self.meta.message_count = len(payload)
 
+    def append_plan(self, plan: dict[str, Any] | None) -> None:
+        """记录任务计划。
+
+        计划必须落盘：它通常建在很早的步骤里，恢复会话时如果丢了，
+        模型会重新规划一遍，前面走过的路白走。
+        """
+        self._append_raw({"type": "plan", "plan": plan, "ts": time.time()})
+
     def append_end(self, reason: str, steps: int) -> None:
         self.meta.end_reason = reason
         self.meta.steps = steps
@@ -195,10 +203,12 @@ class SessionStore:
     # ------------------------------------------------------------ 读取
 
     @staticmethod
-    def read(path: Path) -> tuple[SessionMeta, list[dict[str, Any]]]:
-        """解析一个会话文件，返回 (元数据, 去掉 system 的消息列表)。"""
+    def read(path: Path) -> tuple[SessionMeta, list[dict[str, Any]], dict[str, Any] | None]:
+        """解析会话文件，返回 (元数据, 去掉 system 的消息列表, 计划或 None)。"""
         meta: SessionMeta | None = None
         messages: list[dict[str, Any]] = []
+        plan: dict[str, Any] | None = None
+        saw_plan_record = False
 
         for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             raw = raw.strip()
@@ -223,6 +233,12 @@ class SessionStore:
                 messages.append(record["message"])
             elif kind == "compact" and isinstance(record.get("messages"), list):
                 messages = list(record["messages"])
+            elif kind == "plan":
+                # 允许显式清空计划（plan 为 null），所以要用「见过记录」而不是
+                # 「plan 非空」来判断最终状态
+                saw_plan_record = True
+                raw_plan = record.get("plan")
+                plan = raw_plan if isinstance(raw_plan, dict) else None
             elif kind == "title":
                 if meta:
                     meta.title = str(record.get("title", ""))
@@ -241,9 +257,9 @@ class SessionStore:
             )
         meta.message_count = len(messages)
         meta.updated_at = path.stat().st_mtime
-        return meta, messages
+        return meta, messages, (plan if saw_plan_record else None)
 
-    def load(self) -> tuple[SessionMeta, list[dict[str, Any]]]:
+    def load(self) -> tuple[SessionMeta, list[dict[str, Any]], dict[str, Any] | None]:
         return self.read(self.path)
 
     def close(self) -> None:

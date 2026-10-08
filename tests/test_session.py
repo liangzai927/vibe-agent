@@ -51,7 +51,7 @@ class TestSessionStore(unittest.TestCase):
         store.append_message({"role": "user", "content": "你好"})
         store.append_message({"role": "assistant", "content": "你也好"})
 
-        meta, messages = SessionStore.open(self.root, store.meta.id).load()
+        meta, messages, _ = SessionStore.open(self.root, store.meta.id).load()
 
         self.assertEqual([m["content"] for m in messages], ["你好", "你也好"])
         self.assertEqual(meta.id, store.meta.id)
@@ -61,8 +61,7 @@ class TestSessionStore(unittest.TestCase):
         store.append_message({"role": "system", "content": "内部提示词"})
         store.append_message({"role": "user", "content": "hi"})
 
-        _, messages = store.load()
-
+        _, messages, _ = store.load()
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["role"], "user")
 
@@ -77,8 +76,7 @@ class TestSessionStore(unittest.TestCase):
         )
         store.append_message({"role": "tool", "tool_call_id": "c1", "content": "结果"})
 
-        _, messages = store.load()
-
+        _, messages, _ = store.load()
         self.assertEqual(messages[0]["tool_calls"][0]["id"], "c1")
         self.assertEqual(messages[1]["tool_call_id"], "c1")
 
@@ -101,8 +99,7 @@ class TestSessionStore(unittest.TestCase):
         store.append_compact([{"role": "user", "content": "[摘要] 之前做了些事"}])
         store.append_message({"role": "user", "content": "压缩后的新消息"})
 
-        _, messages = store.load()
-
+        _, messages, _ = store.load()
         self.assertEqual(len(messages), 2)
         self.assertIn("摘要", messages[0]["content"])
         self.assertEqual(messages[1]["content"], "压缩后的新消息")
@@ -114,8 +111,7 @@ class TestSessionStore(unittest.TestCase):
         store.append_message({"role": "user", "content": "中间消息"})
         store.append_compact([{"role": "user", "content": "第二次压缩"}])
 
-        _, messages = store.load()
-
+        _, messages, _ = store.load()
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["content"], "第二次压缩")
 
@@ -156,8 +152,7 @@ class TestSessionStore(unittest.TestCase):
         store.set_title("修复登录 bug")
         store.append_end("finished", 7)
 
-        meta, _ = store.load()
-
+        meta, _, _ = store.load()
         self.assertEqual(meta.title, "修复登录 bug")
         self.assertEqual(meta.steps, 7)
         self.assertEqual(meta.end_reason, "finished")
@@ -171,8 +166,7 @@ class TestSessionStore(unittest.TestCase):
         with store.path.open("a", encoding="utf-8") as handle:
             handle.write('{"type": "message", "message": {"role": "user", "conte')
 
-        meta, messages = store.load()
-
+        meta, messages, _ = store.load()
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["content"], "完整的一行")
 
@@ -215,7 +209,7 @@ class TestAgentSession(AgentTestCase):
         agent, _ = self.make_agent(llm, session=store)
         agent.run("写个文件")
 
-        _, messages = store.load()
+        _, messages, _ = store.load()
         roles = [m["role"] for m in messages]
 
         self.assertEqual(roles[0], "user")
@@ -230,7 +224,7 @@ class TestAgentSession(AgentTestCase):
         agent.run("第一次任务")
 
         reopened = SessionStore.open(self.root, store.meta.id)
-        meta, history = reopened.load()
+        meta, history, _ = reopened.load()
         self.assertTrue(history)
 
         second = ScriptedLLM(turn("第二次回答"))
@@ -250,11 +244,11 @@ class TestAgentSession(AgentTestCase):
         agent.run("第一轮")
 
         reopened = SessionStore.open(self.root, store.meta.id)
-        _, history = reopened.load()
+        _, history, _ = reopened.load()
         agent2, _ = self.make_agent(ScriptedLLM(turn("二")), session=reopened, history=history)
         agent2.run("第二轮")
 
-        _, messages = reopened.load()
+        _, messages, _ = reopened.load()
         contents = [m.get("content") for m in messages if m["role"] == "user"]
         self.assertIn("第一轮", contents)
         self.assertIn("第二轮", contents)
@@ -271,8 +265,7 @@ class TestAgentSession(AgentTestCase):
         agent.run("刷屏")
 
         self.assertGreater(agent.compactions, 0)
-        _, messages = store.load()
-
+        _, messages, _ = store.load()
         # 压缩后落盘的应该是「摘要 + 保留段」，而不是全部原始消息
         self.assertLess(len(messages), len(agent.messages))
         self.assertIn("压缩摘要", messages[0]["content"])
@@ -291,7 +284,7 @@ class TestAgentSession(AgentTestCase):
         agent, _ = self.make_agent(ScriptedLLM(turn("done")), session=store)
         agent.run("随便说说")
 
-        meta, _ = store.load()
+        meta, _, _ = store.load()
         self.assertEqual(meta.end_reason, "finished")
         self.assertEqual(meta.steps, 1)
 
@@ -300,7 +293,7 @@ class TestAgentSession(AgentTestCase):
         agent, _ = self.make_agent(ScriptedLLM(turn("ok")), session=store)
         agent.run("修复登录页的样式问题")
 
-        meta, _ = store.load()
+        meta, _, _ = store.load()
         self.assertIn("修复登录页", meta.title)
 
 

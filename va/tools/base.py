@@ -55,6 +55,14 @@ class Tool(ABC):
         """这次调用可能改动哪些文件——主循环会在执行前对它们抓快照。"""
         return []
 
+    def after_run(self, ui: Any, result: str) -> None:
+        """执行成功后给 UI 一次特殊展示的机会。默认什么都不做。
+
+        用途：有些工具的结果值得完整打印出来（比如更新后的任务计划），
+        而通用的工具结果展示为了不刷屏会把长内容截断。
+        """
+        return None
+
     def summarize(self, args: dict[str, Any]) -> str:
         """一行人类可读的调用摘要，用于终端展示。"""
         parts = []

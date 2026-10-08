@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from ..config import Config
+from ..plan import PlanBoard
 from ..workspace import Workspace
 from .base import Registry, Tool, ToolError, safe_run
 from .fs import EditFile, ListDir, ReadFile, WriteFile
 from .git import GIT_TOOLS
+from .plan import UpdatePlan
 from .render import RENDER_TOOLS
 from .search import Glob, Grep
 from .shell import RunBash
@@ -24,6 +26,7 @@ __all__ = [
     "Glob",
     "Grep",
     "RunBash",
+    "UpdatePlan",
     "GIT_TOOLS",
     "RENDER_TOOLS",
 ]
@@ -37,8 +40,14 @@ def build_registry(
     include_git: bool = True,
     include_render: bool = True,
     cfg: Config | None = None,
+    plan_board: PlanBoard | None = None,
 ) -> Registry:
     registry = Registry()
+
+    # 计划工具排在最前面：它是模型开工前第一个该想到的东西
+    board = plan_board if plan_board is not None else PlanBoard()
+    registry.register(UpdatePlan(board))
+
     for tool_cls in CORE_TOOLS:
         registry.register(tool_cls(workspace))
     if include_git:

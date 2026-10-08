@@ -104,6 +104,27 @@ class UI:
         if len(flat_lines) > 4:
             print(dim(f"  │    … 还有 {len(flat_lines) - 4} 行"))
 
+    def show_plan(self, plan: Any) -> None:
+        """完整打印任务计划。
+
+        通用的工具结果展示会把多行内容截断到 4 行，但计划是模型和用户都要
+        反复回看的东西，值得占屏。
+        """
+        self.newline()
+        lines = plan.render().splitlines()
+        if not lines:
+            return
+        print("  " + bold(lines[0]))
+        for line in lines[1:]:
+            if line.strip().startswith("▸"):
+                print("  " + cyan(line))
+            elif line.strip().startswith("☑"):
+                print("  " + green(line))
+            elif line.strip().startswith("✗"):
+                print("  " + red(line))
+            else:
+                print("  " + line)
+
     # ------------------------------------------------------------------ 审批
 
     def confirm(

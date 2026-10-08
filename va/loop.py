@@ -20,9 +20,11 @@ from .config import Config
 from .history import Checkpoint, UndoStack
 from .llm import LLM, LLMError
 from .messages import AssistantTurn, ToolCall, system_message, tool_message, user_message
+from .plan import Plan, PlanBoard
 from .prompts import build_system_prompt
 from .session import SessionStore
 from .tools import Registry, build_registry, safe_run
+from .tools.plan import UpdatePlan
 from .ui import UI
 from .util import preview, red
 from .workspace import Workspace
@@ -41,11 +43,26 @@ class Agent:
         undo: UndoStack | None = None,
         history: list[dict[str, Any]] | None = None,
         extra_instructions: str = "",
+        plan_board: PlanBoard | None = None,
+        plan: Plan | None = None,
     ) -> None:
         self.cfg = cfg
         self.ui = ui
         self.workspace = workspace or Workspace(cfg.workspace)
-        self.registry = registry or build_registry(self.workspace, cfg=cfg)
+
+        self.plan_board = plan_board or PlanBoard()
+        if plan is not None:
+            self.plan_board.plan = plan
+
+        if registry is None:
+            self.registry = build_registry(
+                self.workspace, cfg=cfg, plan_board=self.plan_board
+            )
+        else:
+            self.registry = registry
+            # 无条件重绑：build_registry 在没收到 plan_board 时会自己造一个，
+            # 那样工具更新的看板和 agent 持有的就不是同一个，计划会写进看不见的地方。
+            self.registry.register(UpdatePlan(self.plan_board))
         self.llm = llm or LLM(cfg)
         self.session = session
         self.undo = undo or UndoStack(self.workspace.root)
@@ -66,10 +83,15 @@ class Agent:
     def session_id(self) -> str | None:
         return self.session.meta.id if self.session else None
 
+    @property
+    def plan(self) -> Plan | None:
+        return self.plan_board.plan
+
     def reset(self) -> None:
         self.messages = [self._system_message()]
         self.compactions = 0
         self.undo = UndoStack(self.workspace.root)
+        self.plan_board.clear()
 
     def run(self, task: str) -> str:
         """执行一个任务，返回模型的最终文本回答。"""
@@ -159,9 +181,14 @@ class Agent:
     # ------------------------------------------------------------------ 内部
 
     def _system_message(self) -> dict[str, Any]:
-        prompt = build_system_prompt(
-            self.workspace, self.registry.catalog(), self.extra_instructions
-        )
+        # 恢复会话时可能已经有一份计划，直接写进系统提示词，
+        # 这样模型第一轮就知道自己站在哪，不用先问一遍
+        extra = self.extra_instructions
+        reminder = self.plan_board.reminder()
+        if reminder:
+            extra = (extra + "\n\n" + reminder).strip()
+
+        prompt = build_system_prompt(self.workspace, self.registry.catalog(), extra)
         return system_message(prompt)
 
     def _append(self, message: dict[str, Any]) -> None:
@@ -186,6 +213,7 @@ class Agent:
         names = "、".join(dict.fromkeys(call.name for call in calls))
         checkpoint = self.undo.begin(names or f"{total} 个工具调用")
         mutating_ran = False
+        plan_updates_before = self.plan_board.updates
 
         try:
             for index, call in enumerate(calls, 1):
@@ -228,6 +256,13 @@ class Agent:
 
                 result, ok = safe_run(tool, args)
                 self.ui.tool_result(result, ok=ok)
+                if ok:
+                    # 有些工具需要特殊展示（比如把计划完整打出来）。
+                    # 展示失败绝不能影响主流程。
+                    try:
+                        tool.after_run(self.ui, result)
+                    except Exception:  # noqa: BLE001
+                        pass
                 self._append(tool_message(call.id, result))
 
                 if ok and (targets or tool.opaque):
@@ -235,6 +270,18 @@ class Agent:
         finally:
             if mutating_ran:
                 self.undo.commit(checkpoint)
+            # 计划变过就落盘：它建得很早，只留在内存里的话恢复会话就丢了
+            if self.plan_board.updates != plan_updates_before:
+                self._persist_plan()
+
+    def _persist_plan(self) -> None:
+        if self.session is None:
+            return
+        plan = self.plan_board.plan
+        try:
+            self.session.append_plan(plan.to_dict() if plan else None)
+        except OSError as exc:
+            self.ui.warn(f"计划写入会话失败（不影响继续工作）：{exc}")
 
     def _approved(self, call: ToolCall, args: dict[str, Any], tool: Any) -> bool:
         preview_text = self._safe_preview(tool, args)
@@ -271,6 +318,14 @@ class Agent:
             "（以下是更早对话的压缩摘要，供你延续上下文；"
             "需要细节时请重新 read_file / grep 确认，不要凭记忆下结论）\n\n" + summary
         )
+
+        # 计划一定要在压缩后重新注入。
+        # 它通常是在很早的步骤里建的，按「保留最近 N 条」的规则必然被丢掉，
+        # 结果就是模型丢了任务清单、开始重复劳动。
+        reminder = self.plan_board.reminder()
+        if reminder:
+            note += "\n\n" + reminder
+
         self.messages = [self.messages[0], user_message(note), *self.messages[keep_from:]]
         self.compactions += 1
         self.ui.info(f"上下文已压缩（第 {self.compactions} 次），丢弃 {len(dropped)} 条历史消息")
