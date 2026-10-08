@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helpers import AgentTestCase  # noqa: E402
 from va import browser as browser_mod  # noqa: E402
+from va import cli  # noqa: E402
 from va import doctor  # noqa: E402
 
 
@@ -63,6 +64,47 @@ class TestWritableHelper(unittest.TestCase):
         self.assertTrue(error)
 
 
+class TestDoctorArgSplitting(unittest.TestCase):
+    """`doctor` 子命令的识别。
+
+    不能让 entrypoint 补的 `-C <路径>` 把 doctor 挤到第二个位置就认不出来——
+    这正是容器里 `docker compose run va doctor` 的真实参数形态。
+    """
+
+    def test_plain_doctor(self):
+        self.assertEqual(cli.split_doctor_args(["doctor", "--quick"]), ([], ["--quick"]))
+
+    def test_doctor_after_workspace_option(self):
+        head, tail = cli.split_doctor_args(["-C", "/workspace", "doctor", "--offline"])
+        self.assertEqual(head, ["-C", "/workspace"])
+        self.assertEqual(tail, ["--offline"])
+
+    def test_long_workspace_option(self):
+        head, tail = cli.split_doctor_args(["--workspace", "/w", "doctor"])
+        self.assertEqual(head, ["--workspace", "/w"])
+        self.assertEqual(tail, [])
+
+    def test_doctor_with_workspace_after_it(self):
+        head, tail = cli.split_doctor_args(["doctor", "-C", "/w", "--json"])
+        self.assertEqual(head, [])
+        self.assertEqual(tail, ["-C", "/w", "--json"])
+
+    def test_non_doctor_task_returns_none(self):
+        self.assertIsNone(cli.split_doctor_args(["doctor 一下这个仓库"]))
+        self.assertIsNone(cli.split_doctor_args(["修一下登录页"]))
+        self.assertIsNone(cli.split_doctor_args([]))
+
+    def test_a_task_literally_starting_with_a_path_is_not_doctor(self):
+        self.assertIsNone(cli.split_doctor_args(["-C", "/w", "修复 bug"]))
+
+    def test_value_options_are_skipped(self):
+        """`-m doctor` 里的 doctor 是模型名，不是子命令。"""
+        self.assertIsNone(cli.split_doctor_args(["-m", "doctor", "修复 bug"]))
+
+    def test_resume_id_is_not_mistaken_for_a_task(self):
+        self.assertIsNone(cli.split_doctor_args(["--resume", "20260101-120000-abcd"]))
+
+
 class TestChecks(AgentTestCase):
     def test_python_ok(self):
         result = doctor.check_python()
@@ -87,12 +129,23 @@ class TestChecks(AgentTestCase):
             result = doctor.check_git_identity()
         self.assertEqual(result.status, doctor.FAIL)
         self.assertIn("git config --global user.name", result.hint)
+        # 「可选」是刻意的：没配 git 身份 agent 照样能读写代码，只是提交不了。
+        # 标成必需会让 CI 里 doctor 永远返回非零。
+        self.assertEqual(result.level, doctor.OPTIONAL)
 
     def test_git_identity_when_present(self):
         with mock.patch.object(doctor, "_shell", side_effect=[(0, "张三"), (0, "z@example.com")]):
             result = doctor.check_git_identity()
         self.assertEqual(result.status, doctor.OK)
         self.assertIn("张三", result.detail)
+
+    def test_missing_git_identity_alone_does_not_fail_the_report(self):
+        """只有可选项失败时，doctor 必须返回 0，否则 CI 里没法当门禁。"""
+        report = doctor.Report()
+        report.add(doctor.check_python())
+        report.add(doctor.Result("git 身份", doctor.FAIL, level=doctor.OPTIONAL))
+        self.assertEqual(report.failed_required, [])
+        self.assertTrue(report.to_dict()["ok"])
 
     def test_api_without_key_is_skipped_not_failed(self):
         self.cfg.api_key = ""

@@ -158,15 +158,17 @@ def check_git_identity() -> Result:
     _, name = _shell(["git", "config", "--global", "user.name"])
     _, email = _shell(["git", "config", "--global", "user.email"])
     if name and email:
-        return Result("git 身份", OK, f"{name} <{email}>", "", REQUIRED)
+        return Result("git 身份", OK, f"{name} <{email}>", "", OPTIONAL)
     missing = "、".join(x for x, v in (("user.name", name), ("user.email", email)) if not v)
+    # 标为「可选」是刻意的：没配 git 身份 agent 照样能读写代码、跑测试，
+    # 只是提交不了。标成必需会让 CI 里 doctor 永远返回非零。
     return Result(
         "git 身份",
         FAIL,
         f"未配置 {missing}",
-        "agent 提交代码时会失败。设置："
+        "agent 提交代码时会失败（其他功能不受影响）。设置："
         "git config --global user.name '你的名字' && git config --global user.email 'you@example.com'",
-        REQUIRED,
+        OPTIONAL,
     )
 
 

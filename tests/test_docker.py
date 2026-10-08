@@ -37,6 +37,18 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def image_env_names() -> set[str]:
+    """镜像里用 ENV 设置过的变量名（含续行）。"""
+    joined = read(DOCKERFILE).replace("\\\n", " ")
+    names: set[str] = set()
+    for line in joined.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("ENV "):
+            for token in stripped[4:].split():
+                names.add(token.split("=", 1)[0])
+    return names
+
+
 class TestDockerfile(unittest.TestCase):
     def setUp(self) -> None:
         self.text = read(DOCKERFILE)
@@ -137,6 +149,35 @@ class TestDockerfile(unittest.TestCase):
     def test_copy_uses_chown_so_files_are_not_root_owned(self):
         self.assertIn("--chown=va:va", self.text)
 
+    def test_declares_pythonpath(self):
+        """compose 把 working_dir 设成 /workspace，cwd 就不在 /app 了。
+
+        没有 PYTHONPATH 的话 `python3 -m va` 直接 ModuleNotFoundError——
+        而 README 里推荐的入口正是这条路。
+        """
+        self.assertRegex(self.code, r"(?m)^\s*PYTHONPATH=/app")
+
+    def test_build_args_accept_truthy_values(self):
+        """`--build-arg WITH_BROWSER=true` 不该被静默忽略。"""
+        for name in ("WITH_NODE", "WITH_BROWSER"):
+            self.assertRegex(
+                self.code,
+                rf"{name}\" in|{name}\" =|{name}\" }}",
+                f"{name} 的开关判断没找到",
+            )
+        self.assertIn("true|TRUE|yes|YES|on|ON", self.code)
+        self.assertIn("跳过", self.code, "关闭可选组件时应该明确说一声，而不是静默跳过")
+
+    def test_node_download_is_checksum_verified(self):
+        self.assertIn("SHASUMS256.txt", self.code)
+        self.assertIn("sha256sum -c -", self.code, "下载的 Node 包没有校验完整性")
+
+    def test_env_var_names(self):
+        names = image_env_names()
+        self.assertIn("VA_WORKSPACE", names)
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH", names)
+        self.assertIn("PYTHONPATH", names)
+
     def test_no_secrets_baked_in(self):
         # 只看真正会执行的指令，注释里的 `-e VA_API_KEY=sk-xxx` 是用法示例
         code = "\n".join(
@@ -228,6 +269,23 @@ class TestEntrypointExecution(unittest.TestCase):
             timeout=60,
         )
 
+    def _run_without_workspace_env(self, *args: str):
+        """模拟 compose 里裸 key 把镜像 ENV 删掉的情形：环境里根本没有 VA_WORKSPACE。"""
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("VA_WORKSPACE", "VA_GIT_SAFE_DIRECTORY")
+        }
+        env["HOME"] = str(self.home)
+        env["VA_GIT_SAFE_DIRECTORY"] = "0"
+        return subprocess.run(
+            ["bash", str(ENTRYPOINT), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+
     def test_executes_the_command(self):
         result = self._run("bash", "-c", "echo 来自容器内部")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -238,12 +296,98 @@ class TestEntrypointExecution(unittest.TestCase):
         self._run("true")
         self.assertTrue(self.workspace.is_dir(), "VA_WORKSPACE 不存在时应自动创建")
 
+    def test_survives_missing_workspace_env_var(self):
+        """compose 的裸 key 形式会把镜像 ENV 删掉。
+
+        在 `set -u` 下裸用 $VA_WORKSPACE 会让容器以 "unbound variable" 退出 1。
+        测试机不是 root，建不出 /workspace（那是环境限制），所以这里只断言
+        「不是死在变量未定义上」；默认值逻辑由 test_workspace_env_has_safe_default
+        做静态校验。
+        """
+        result = self._run_without_workspace_env("true")
+        self.assertNotIn("unbound variable", result.stderr, "变量未定义导致退出")
+        self.assertNotIn("VA_WORKSPACE:", result.stderr, "变量未定义导致退出")
+
+    def test_workspace_env_has_safe_default(self):
+        # 注释里也会提到 $VA_WORKSPACE，先剥掉
+        code = "\n".join(
+            line
+            for line in read(ENTRYPOINT).splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertIn(
+            "${VA_WORKSPACE:-",
+            code,
+            "VA_WORKSPACE 必须带默认值，否则镜像 ENV 被删掉时 set -u 会直接退出",
+        )
+        self.assertNotIn(
+            "$VA_WORKSPACE",
+            code,
+            "不允许裸用 $VA_WORKSPACE —— 统一走带默认值的 WS 变量",
+        )
+
+    def test_wraps_non_executable_args_as_va_arguments(self):
+        """`docker compose run va doctor` 是替换 CMD 而不是追加。
+
+        于是 entrypoint 收到 ["doctor"]，直接 exec 会去找一个叫 doctor 的可执行
+        文件。这里验证兜底逻辑会把它变成 `python3 -m va doctor`。
+        """
+        result = subprocess.run(
+            ["bash", str(ENTRYPOINT), "doctor", "--offline", "--quick"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={
+                **os.environ,
+                "HOME": str(self.home),
+                "VA_WORKSPACE": str(self.workspace),
+                "VA_GIT_SAFE_DIRECTORY": "0",
+                # 让 python3 -m va 在测试机上也找得到包
+                "PYTHONPATH": str(ROOT),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("环境自检", result.stdout, "参数没被兜底成 va 的参数")
+
+    def test_wraps_task_string_as_va_argument(self):
+        """`docker compose run va "修个 bug"` 同样走兜底。"""
+        result = subprocess.run(
+            ["bash", str(ENTRYPOINT), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={
+                **os.environ,
+                "HOME": str(self.home),
+                "VA_WORKSPACE": str(self.workspace),
+                "VA_GIT_SAFE_DIRECTORY": "0",
+                "PYTHONPATH": str(ROOT),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("vibe-agent", result.stdout)
+
+    def test_existing_executable_is_not_wrapped(self):
+        result = self._run("bash", "-c", "echo 直接执行 bash")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("直接执行 bash", result.stdout)
+        self.assertNotIn("No module named", result.stderr)
+
     def test_browser_install_without_root_is_skipped_not_fatal(self):
         """非 root 时装不了系统库——要提示，但不能因此整个容器起不来。"""
         result = self._run("bash", "-c", "echo 仍然继续执行", VA_INSTALL_BROWSER="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("仍然继续执行", result.stdout)
         self.assertIn("需要以 root 启动", result.stderr)
+
+    def test_truthy_values_are_accepted_for_browser_install(self):
+        """VA_INSTALL_BROWSER=true 不能被静默忽略，得跟代码里的开关语义一致。"""
+        result = self._run("true", VA_INSTALL_BROWSER="true")
+        self.assertIn("需要以 root 启动", result.stderr)
+
+    def test_browser_install_fully_disabled_stays_quiet(self):
+        result = self._run("true", VA_INSTALL_BROWSER="0")
+        self.assertNotIn("VA_INSTALL_BROWSER", result.stderr)
 
     def test_warns_when_git_identity_is_missing(self):
         """容器里没有开发机的 ~/.gitconfig，不提就等着 agent 提交时才失败。"""
@@ -271,6 +415,14 @@ class TestEntrypointExecution(unittest.TestCase):
         config = (self.home / ".gitconfig").read_text(encoding="utf-8")
         self.assertIn("safe", config)
         self.assertIn("*", config)
+
+    def test_safe_directory_does_not_accumulate(self):
+        """家目录是持久卷；用 --add 的话每次启动追加一行，.gitconfig 会一直涨。"""
+        for _ in range(3):
+            self._run("true", VA_GIT_SAFE_DIRECTORY="1")
+        config = (self.home / ".gitconfig").read_text(encoding="utf-8")
+        occurrences = config.count("directory = *")
+        self.assertEqual(occurrences, 1, f"safe.directory 被重复写了 {occurrences} 次")
 
 
 class TestDockerignore(unittest.TestCase):
@@ -345,6 +497,30 @@ class TestCompose(unittest.TestCase):
 
     def test_no_deprecated_version_key(self):
         self.assertNotIn("version", self.data, "compose v2 已弃用顶层 version 字段")
+
+    def test_does_not_bare_key_image_env_vars(self):
+        """给镜像已用 ENV 设过的变量写裸 key，docker 会把它当成「删除该变量」。
+
+        这个坑很隐蔽：`- VA_WORKSPACE` 在宿主机没导出该变量时，会把镜像的
+        `ENV VA_WORKSPACE=/workspace` 抹掉，entrypoint 在 `set -u` 下直接退出 1。
+        PLAYWRIGHT_BROWSERS_PATH 同理，被删后 playwright 会回落到 ~/.cache，
+        找不到构建时装在 /opt 的 Chromium。
+        """
+        image_env = image_env_names()
+        offenders = [key for key in self.service["environment"] if key in image_env]
+        self.assertFalse(
+            offenders,
+            f"compose 用裸 key 透传了镜像已 ENV 设置的变量：{offenders}。\n"
+            f"docker 会把镜像的值删掉。改成 `NAME=${{NAME:-默认值}}`，或者干脆不写。",
+        )
+
+    def test_no_container_name(self):
+        """固定 container_name 会让两个 `docker compose run` 并发冲突。"""
+        self.assertNotIn(
+            "container_name",
+            self.service,
+            "去掉 container_name，compose run 才能并行跑",
+        )
 
 
 class TestEnvVarConsistency(unittest.TestCase):

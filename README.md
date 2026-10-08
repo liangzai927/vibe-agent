@@ -142,16 +142,17 @@ docker run --rm -it \
 
 ### 这套配置验证到什么程度
 
-诚实说明，因为「没验证过」和「验证过」在出问题时差别很大：
+诚实说明，因为「没验证过」和「验证过」在出问题时差别很大。
 
 **已经实测的**
 
 - entrypoint 真跑过：非 root 路径、自动创建 `VA_WORKSPACE`、
+  参数兜底（`docker compose run va doctor` 能正确变成 `python3 -m va doctor`）、
   `VA_INSTALL_BROWSER=1` 但非 root 时提示后继续（而不是崩）、
-  未配 git 身份时的提醒、`safe.directory` 的落地
+  未配 git 身份时的提醒、`safe.directory` 不重复累积
 - 基础镜像 `python:3.12-slim-bookworm` 存在，且有 `amd64` / `arm64` 两个架构
 - 全部 apt 包（`ca-certificates` `curl` `git` `less` `ripgrep` `gosu` `tini` `xz-utils`）
-  在 Debian bookworm 里存在
+  在 Debian bookworm 里存在；`gosu` 装在 `/usr/sbin`（不是 `/usr/bin`）
 - Node tarball 的版本发现逻辑：`x64` 与 `arm64` 都能正确解析出文件名，
   下载地址返回 HTTP 200
 - 容器配置的一致性检查全部通过（见下方「测试」一节）
@@ -169,6 +170,36 @@ docker run --rm -it \
 ```bash
 docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
 ```
+
+### 四个差点漏掉的坑
+
+镜像没法在本机构建，所以这套配置额外请了一轮**对抗性审查**。它抓出了几个
+「本机测不出来、但容器一跑就废」的问题，都值得记下来：
+
+1. **`PYTHONPATH` 缺失。** compose 把 `working_dir` 设成 `/workspace`，
+   覆盖了镜像的 `WORKDIR /app`。于是 `python3 -m va` 的 cwd 不在包目录里，
+   直接 `ModuleNotFoundError`——而 README 里推荐的入口正是这条路。
+   修法：镜像里显式 `ENV PYTHONPATH=/app`，让包的可见性与 cwd 解耦。
+
+2. **compose 的裸 key 会删掉镜像的 ENV。** 写 `- VA_WORKSPACE`（只有 key
+   没有值）时，如果宿主机没导出这个变量，docker 会把「没有 `=` 的条目」当成
+   *删除该变量*，于是镜像的 `ENV VA_WORKSPACE=/workspace` 被抹掉。
+   entrypoint 在 `set -u` 下裸用 `$VA_WORKSPACE` → `unbound variable` → 退出 1。
+   同一个坑也适用于 `PLAYWRIGHT_BROWSERS_PATH`（被删后 playwright 回落到
+   `~/.cache/ms-playwright`，找不到构建时装在 `/opt` 的 Chromium）。
+   修法：这两个变量不从 compose 透传，用镜像默认值；entrypoint 里统一走
+   `WS="${VA_WORKSPACE:-/workspace}"`。
+
+3. **`docker compose run` 是替换 CMD 而不是追加。** 所以
+   `docker compose run --rm va doctor` 到了容器里就变成执行一个叫 `doctor`
+   的可执行文件，然后 not found。修法：entrypoint 里做参数兜底——第一个参数
+   如果不是可执行文件，就当成 `va` 的参数。
+
+4. **`ensure_workspace` 排在 `align_user` 之前（危险）。** 它会用旧 uid 去
+   chown 挂载进来的宿主目录。在 Linux 上这会**真的改掉你本机那个目录的属主**；
+   而且改完再对齐 uid，容器里的 va 反而写不了自己的工作区。
+   修法：先对齐身份，而且只在 va 确实写不进去时才动属主、失败要打日志
+   （原来被 `2>/dev/null || true` 吞掉了）。
 
 ### 环境变量
 
@@ -338,12 +369,12 @@ python3 -m unittest discover -s tests -v     # 用现有环境，缺依赖的用
 make test-full                                # 装齐依赖后跑，零跳过
 ```
 
-215 个测试，**不需要 API key**。缺可选依赖的用例会优雅跳过而不是变红——
+238 个测试，**不需要 API key**。缺可选依赖的用例会优雅跳过而不是变红——
 同一个套件在「只有核心依赖」和「装了全部依赖」的环境下都能跑：
 
 ```
-系统 python（仅核心）         215 tests, OK (skipped=14)
-venv（playwright+Pillow+pyyaml）215 tests, OK (skipped=1)
+系统 python（仅核心）         238 tests, OK (skipped=14)
+venv（playwright+Pillow+pyyaml）238 tests, OK (skipped=1)
 ```
 
 | 文件 | 覆盖 |

@@ -35,7 +35,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VA_APP_DIR=/app \
     VA_HOME=/home/va \
     VA_WORKSPACE=/workspace \
-    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    PYTHONPATH=/app
 
 # ---------------------------------------------------------------- 基础工具
 # gosu  —— 启动时从 root 降权到普通用户（比 su 的信号处理好）
@@ -54,24 +55,40 @@ RUN apt-get update \
 
 # ---------------------------------------------------------------- Node（可选）
 # 直接取官方 tarball 而不是加 apt 源，省掉 gnupg 和 keyring 那一堆事。
-RUN if [ "$WITH_NODE" = "1" ]; then \
-        set -eux; \
-        arch="$(dpkg --print-architecture)"; \
-        case "$arch" in \
-            amd64) narch=x64 ;; \
-            arm64) narch=arm64 ;; \
-            *) echo "不支持的架构: $arch" >&2; exit 1 ;; \
-        esac; \
-        base="https://nodejs.org/dist/latest-v${NODE_MAJOR}.x"; \
-        file="$(curl -fsSL "${base}/SHASUMS256.txt" \
-                | grep -o "node-v[0-9.]*-linux-${narch}\.tar\.xz" | head -1)"; \
-        test -n "$file"; \
-        curl -fsSL "${base}/${file}" -o /tmp/node.tar.xz; \
-        tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; \
-        rm -f /tmp/node.tar.xz; \
-        node --version; \
-        npm --version; \
-    fi
+#
+# 开关接受 1/true/yes/on —— 只认字面 "1" 的话，`--build-arg WITH_NODE=true`
+# 会静默跳过安装，用户还以为装上了。
+RUN case "$WITH_NODE" in \
+        1|true|TRUE|yes|YES|on|ON) \
+            set -eux; \
+            arch="$(dpkg --print-architecture)"; \
+            case "$arch" in \
+                amd64) narch=x64 ;; \
+                arm64) narch=arm64 ;; \
+                *) echo "不支持的架构: $arch" >&2; exit 1 ;; \
+            esac; \
+            base="https://nodejs.org/dist/latest-v${NODE_MAJOR}.x"; \
+            sums="$(curl -fsSL "${base}/SHASUMS256.txt")"; \
+            file="$(printf '%s\n' "$sums" \
+                    | grep -o "node-v[0-9.]*-linux-${narch}\.tar\.xz" | head -1)"; \
+            if [ -z "$file" ]; then \
+                echo "没能从 SHASUMS256.txt 解析出 linux-${narch} 的 Node 包名" >&2; \
+                exit 1; \
+            fi; \
+            expected="$(printf '%s\n' "$sums" | grep " ${file}\$" | awk '{print $1}')"; \
+            if [ -z "$expected" ]; then \
+                echo "SHASUMS256.txt 里没有 ${file} 的校验和" >&2; \
+                exit 1; \
+            fi; \
+            curl -fsSL "${base}/${file}" -o /tmp/node.tar.xz; \
+            echo "${expected}  /tmp/node.tar.xz" | sha256sum -c -; \
+            tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; \
+            rm -f /tmp/node.tar.xz; \
+            node --version; \
+            npm --version ;; \
+        *) \
+            echo "WITH_NODE=$WITH_NODE，跳过 Node 安装" >&2 ;; \
+    esac
 
 # ---------------------------------------------------------------- 普通用户
 RUN useradd --create-home --uid 1000 --shell /bin/bash va \
@@ -87,17 +104,21 @@ COPY requirements.txt requirements-browser.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ---------------------------------------------------------------- 浏览器（可选）
-# 用 Playwright 官方的 --with-deps，让它自己装 Chromium 需要的系统库。
+# 用 Playwright 官方的 --with-deps，让它自己装 Chromium 需要的系统库
+# （它会顺带装上 fonts-wqy-zenhei 等 CJK 字体，中文截图不会变豆腐块）。
 # 装到 PLAYWRIGHT_BROWSERS_PATH，这样非 root 用户也能读到。
-RUN if [ "$WITH_BROWSER" = "1" ]; then \
-        set -eux; \
-        pip install --no-cache-dir -r requirements-browser.txt; \
-        mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"; \
-        playwright install --with-deps chromium; \
-        chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"; \
-        touch "$PLAYWRIGHT_BROWSERS_PATH/.installed"; \
-        rm -rf /var/lib/apt/lists/*; \
-    fi
+RUN case "$WITH_BROWSER" in \
+        1|true|TRUE|yes|YES|on|ON) \
+            set -eux; \
+            pip install --no-cache-dir -r requirements-browser.txt; \
+            mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"; \
+            playwright install --with-deps chromium; \
+            chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"; \
+            touch "$PLAYWRIGHT_BROWSERS_PATH/.installed"; \
+            rm -rf /var/lib/apt/lists/* ;; \
+        *) \
+            echo "WITH_BROWSER=$WITH_BROWSER，跳过浏览器安装（可用 VA_INSTALL_BROWSER=1 在运行时补装）" >&2 ;; \
+    esac
 
 # ---------------------------------------------------------------- 应用代码
 COPY --chown=va:va . .

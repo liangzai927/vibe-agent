@@ -1,7 +1,8 @@
 # vibe-agent 的 compose 配置。
 #
-# 用法：
-#   cp .env.example .env      # 填 VA_API_KEY
+# 用法（entrypoint 会把非可执行命令自动当成 va 的参数，所以下面都能跑）：
+#   cp .env.example .env
+#   docker compose build
 #   docker compose run --rm va                       # 交互模式
 #   docker compose run --rm va "修一下登录页的样式"     # 一次性任务
 #   docker compose run --rm va -c                    # 接着上次的会话
@@ -10,8 +11,12 @@
 # 工作区默认用当前目录；要指定别的仓库：
 #   WORKSPACE=/path/to/repo docker compose run --rm va
 #
-# 环境变量在这里用「只写 key」的写法：值从宿主机同名变量透传，
-# 宿主机没设就留空，由容器里的 .env 或命令参数兜底。
+# 环境变量用「只写 key」的写法：值从宿主机同名变量透传，宿主机没设就留空。
+#
+# 注意：**不要**给镜像里已经用 ENV 设过的变量写裸 key 形式
+# （例如 `- VA_WORKSPACE`）。docker 会把「没有 = 的条目」当成「删除该变量」，
+# 于是镜像的 ENV 被抹掉，entrypoint 在 set -u 下直接退出。
+# 这类变量必须写成 `- NAME=${NAME:-默认值}`，或者干脆不写（用镜像的默认）。
 
 name: vibe-agent
 
@@ -24,11 +29,11 @@ services:
         WITH_NODE: "${WITH_NODE:-1}"
         WITH_BROWSER: "${WITH_BROWSER:-1}"
     image: "vibe-agent:${TAG:-latest}"
-    container_name: vibe-agent
-    init: true
     stdin_open: true
     tty: true
     working_dir: /workspace
+    # 不设 container_name：那会让两个 `docker compose run` 并发冲突。
+    # 也不设 init：ENTRYPOINT 里的 tini 已经在做 PID 1 该做的事。
 
     volumes:
       # 你的代码仓库
@@ -52,7 +57,8 @@ services:
       - VA_CONTEXT_BUDGET
       - VA_AUTO_APPROVE
       - VA_SHOW_THINKING
-      - VA_WORKSPACE
+      # VA_WORKSPACE 不在这里透传：镜像已经 ENV 设成 /workspace，
+      # 写裸 key 反而会把镜像的值删掉。要改就直接写死值。
       - VA_SESSION_DIR
       # ---- 视觉模型（UI 对比用，可选）----
       - VA_VISION_API_KEY
@@ -62,7 +68,8 @@ services:
       - VA_BROWSER_CHANNEL
       - VA_BROWSER_EXECUTABLE
       - VA_INSTALL_BROWSER
-      - PLAYWRIGHT_BROWSERS_PATH
+      # PLAYWRIGHT_BROWSERS_PATH 同上：镜像已设，透传裸 key 会把它删掉，
+      # 结果 playwright 回落到 ~/.cache 找不到构建时装好的 Chromium。
       # ---- 容器行为 ----
       - VA_UID
       - VA_GID

@@ -1,4 +1,7 @@
 # 可选依赖 —— 只有在需要「渲染页面 / 截图对比」能力时才装。
 # 容器里通过 VA_INSTALL_BROWSER=1 触发安装，宿主机上 pip install -r 即可。
-playwright>=1.40
-pillow>=10.0
+#
+# 上界锁到 2.0：playwright 的浏览器下载路径和 --with-deps 的行为在大版本间
+# 会变，而镜像构建时把 Chromium 固定在某个路径上，升级后可能找不到。
+playwright>=1.40,<2.0
+pillow>=10.0,<13.0

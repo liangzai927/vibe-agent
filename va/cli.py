@@ -62,12 +62,54 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# 主解析器里「带值」的选项。扫描 doctor 子命令时要跳过它们的值，
+# 否则 `-C /path doctor` 里的 /path 会被误当成第一个位置参数。
+_VALUE_OPTIONS = frozenset(
+    {"-C", "--workspace", "-m", "--model", "--base-url", "--resume", "--max-steps"}
+)
+
+
+def split_doctor_args(raw: list[str]) -> tuple[list[str], list[str]] | None:
+    """在参数里找 `doctor` 子命令。
+
+    返回 (doctor 之前需要转交的全局参数, doctor 之后的参数)；没有 doctor 则返回 None。
+
+    这里不能只看 ``raw[0]``：容器里 entrypoint 会补上 ``-C /workspace``，
+    于是 doctor 跑到了第二个位置。
+    """
+    index = 0
+    passthrough: list[str] = []
+    while index < len(raw):
+        token = raw[index]
+
+        if token == "--":
+            index += 1
+            break
+        if token in _VALUE_OPTIONS:
+            if token in ("-C", "--workspace") and index + 1 < len(raw):
+                passthrough += [token, raw[index + 1]]
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+
+        # 第一个位置参数：是 doctor 就走 doctor，否则是普通任务
+        if token == "doctor":
+            return passthrough, raw[index + 1 :]
+        return None
+
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
 
     # doctor 是子命令，不是交给 agent 的任务 —— 提前拦截
-    if raw and raw[0] == "doctor":
-        return _doctor(raw[1:])
+    doctor_split = split_doctor_args(raw)
+    if doctor_split is not None:
+        head, tail = doctor_split
+        return _doctor(head + tail)
 
     args = build_parser().parse_args(raw)
     cfg = Config.load(args.workspace)

@@ -85,6 +85,12 @@ class Config:
         ws = workspace or os.environ.get("VA_WORKSPACE") or Path.cwd()
         ws_path = Path(ws).expanduser().resolve()
 
+        # 工作区里的 .env 也要读。
+        # 容器里 cwd 是 /app，用户仓库挂在 /workspace —— 只读 cwd 的话，
+        # 用户照 .env.example 在仓库里配的东西完全不生效，很难排查。
+        # 前面已经 setdefault 过的键不会被覆盖，所以环境变量优先级仍然最高。
+        load_dotenv(ws_path / ".env")
+
         api_key = (
             os.environ.get("VA_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
