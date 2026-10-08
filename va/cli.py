@@ -29,8 +29,8 @@ HELP = """可用命令：
   /feature <需求>  跑一遍功能开发流水线（建分支→规划→编码→自测→自审→提交）
   /paste [名字]     把剪贴板里的图片存成文件，并给出路径
   /plan            查看当前任务计划
-  /models          列出服务商支持的所有模型
-  /model [名字]     查看或切换模型（会写进 .env 持久化）
+  /model           模型选择器（↑↓ 移动，回车确定）
+  /models          列出所有模型（纯文本，不进选择器）
   /undo [N]        撤销最近 N 步的文件改动（默认 1 步）
   /checkpoints     列出可撤销的步骤
   /sessions        列出本项目的历史会话
@@ -760,25 +760,51 @@ def _show_models(agent: Agent, ui: UI) -> None:
             print(dim(f"  提示：{candidates[0]} 能读图。配成视觉模型后就能参考设计稿了："))
             print(dim(f"        在 .env 里加 VA_VISION_MODEL={candidates[0]}"))
             print()
-    print(dim("  用 /model <名字> 切换"))
+    print(dim("  /model 打开选择器（上下键选，回车确定）；/model <名字> 直接切"))
 
 
 def _switch_model(agent: Agent, ui: UI, name: str) -> None:
     from .config import write_env_values
     from .models import load_catalog
 
+    catalog = load_catalog(Path(__file__).resolve().parent.parent)
+
     if not name:
-        ui.info(f"当前模型：{agent.cfg.model}")
-        catalog = load_catalog(Path(__file__).resolve().parent.parent)
-        if catalog and catalog.models:
-            ui.info(f"可切换 {len(catalog.ids)} 个，用 /models 查看")
-        return
+        # 不给名字就进交互式选择器：上下键移动、回车确定。
+        # 手打模型名既费事又容易打错，而换模型是个高频动作。
+        if not catalog or not catalog.models:
+            ui.info(f"当前模型：{agent.cfg.model}")
+            ui.warn("还没有模型清单，跑一次 `python3 run.py setup` 就能拉下来。")
+            return
+        if len(catalog.models) == 1:
+            ui.info(f"只有一个可用模型：{catalog.ids[0]}")
+            return
+
+        from .picker import select_model
+
+        try:
+            picked = select_model(
+                catalog.models,
+                current=agent.cfg.model,
+                vision=agent.cfg.vision_model,
+            )
+        except (KeyboardInterrupt, EOFError):
+            ui.newline()
+            ui.info("已取消")
+            return
+
+        if picked is None:
+            ui.info("已取消")
+            return
+        if picked == agent.cfg.model:
+            ui.info(f"还是 {picked}，没变")
+            return
+        name = picked
 
     if name == agent.cfg.model:
         ui.info(f"已经是 {name} 了")
         return
 
-    catalog = load_catalog(Path(__file__).resolve().parent.parent)
     if catalog and catalog.models and name not in catalog.ids:
         # 不在清单里不直接拒绝——清单可能是旧的，或者用户就是想试个新的
         ui.warn(f"{name} 不在已缓存的清单里（可能清单过期了）。仍然切过去。")

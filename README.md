@@ -93,12 +93,31 @@ python3 run.py setup              # 或 python3 setup_key.py
 python3 run.py setup --force      # 已经配过也想重配
 ```
 
-**模型清单会缓存下来**（`.models.json`），之后换模型不用再翻文档：
+**模型清单会缓存下来**（`.models.json`），之后换模型不用再翻文档。
+
+终端里直接打 `/model`，进交互式选择器——**上下键移动、回车确定**：
 
 ```
-› /models        # 列出所有可用模型，标注哪些能读图
-› /model deepseek-flash   # 切换，并写进 .env 持久化
+› /model
+
+  选择模型
+  ↑↓ 移动 · Enter 确定 · Esc 取消
+
+   ❯ deepseek-chat      当前
+     deepseek-flash     可读图
+     deepseek-v4-pro
 ```
+
+浏览器界面里就是顶栏的下拉框，点一下即可。
+
+另外两种方式：
+
+```
+› /models                 # 纯文本列出（不进选择器，便于复制）
+› /model deepseek-flash   # 直接指定，跳过选择器
+```
+
+三者都会**写进 `.env` 持久化**，下次启动还是它。
 
 > 顺带一提：**视觉模型不一定非要另开一家**。上面这个例子里 DeepSeek 自己的
 > `deepseek-flash` 就支持图片输入，同一个 key 就能用来读设计稿。
