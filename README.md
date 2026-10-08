@@ -6,6 +6,9 @@ diff 生成、文件快照、会话持久化、UI 渲染闭环全部自己实现
 
 支持 **Docker 一条命令在任意机器上跑起来**，也可以直接在本地用 Python 运行。
 
+> 要部署到别的机器？看 **[DEPLOY.md](DEPLOY.md)**，或者直接：
+> `./scripts/package.sh` 打包（约 190KB）→ 拷过去 → `./scripts/install.sh`。
+
 ---
 
 ## 快速开始

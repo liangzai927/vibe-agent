@@ -11,7 +11,7 @@ WORKSPACE ?= $(CURDIR)
 IMAGE ?= vibe-agent:latest
 
 .DEFAULT_GOAL := help
-.PHONY: help venv install install-browser install-dev test test-full doctor run fmt clean \
+.PHONY: help venv install install-browser install-dev test test-full doctor run clean package \
         docker-build docker-build-slim docker-run docker-shell docker-doctor \
         docker-test compose-up compose-run compose-doctor
 
@@ -52,10 +52,16 @@ doctor:  ## 环境自检
 run:  ## 进入交互模式
 	$(PYTHON) run.py -C "$(WORKSPACE)"
 
+package:  ## 打一个可以拷到别的机器的包（不含密钥，约 190KB）
+	./scripts/package.sh
+
+package-from-worktree:  ## 打包当前工作区（含未提交改动）
+	./scripts/package.sh --working-tree
+
 clean:  ## 清理缓存与临时产物
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	find . -type d -name '*.egg-info' -prune -exec rm -rf {} +
-	rm -rf .pytest_cache .mypy_cache .ruff_cache
+	rm -rf .pytest_cache .mypy_cache .ruff_cache dist
 
 # ------------------------------------------------------------------ 容器
 
