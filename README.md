@@ -140,6 +140,36 @@ docker run --rm -it \
 不传也能跑，但 agent 执行 `git_commit` 时会失败在很晚的地方，entrypoint
 启动时会提前提醒一次。
 
+### 这套配置验证到什么程度
+
+诚实说明，因为「没验证过」和「验证过」在出问题时差别很大：
+
+**已经实测的**
+
+- entrypoint 真跑过：非 root 路径、自动创建 `VA_WORKSPACE`、
+  `VA_INSTALL_BROWSER=1` 但非 root 时提示后继续（而不是崩）、
+  未配 git 身份时的提醒、`safe.directory` 的落地
+- 基础镜像 `python:3.12-slim-bookworm` 存在，且有 `amd64` / `arm64` 两个架构
+- 全部 apt 包（`ca-certificates` `curl` `git` `less` `ripgrep` `gosu` `tini` `xz-utils`）
+  在 Debian bookworm 里存在
+- Node tarball 的版本发现逻辑：`x64` 与 `arm64` 都能正确解析出文件名，
+  下载地址返回 HTTP 200
+- 容器配置的一致性检查全部通过（见下方「测试」一节）
+
+**没有实测的（本机没装 Docker）**
+
+- `docker build` 全流程
+- 镜像内 Chromium 是否真的能启动
+- UID/GID 对齐在真实挂载卷上的效果
+
+所以**首次构建请留意输出**。如果失败，最可能的位置是 Chromium 那一步
+（`playwright install --with-deps`），其次是 Node 下载。两者都可以用
+构建参数关掉来隔离问题：
+
+```bash
+docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
+```
+
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -308,12 +338,12 @@ python3 -m unittest discover -s tests -v     # 用现有环境，缺依赖的用
 make test-full                                # 装齐依赖后跑，零跳过
 ```
 
-208 个测试，**不需要 API key**。缺可选依赖的用例会优雅跳过而不是变红——
+215 个测试，**不需要 API key**。缺可选依赖的用例会优雅跳过而不是变红——
 同一个套件在「只有核心依赖」和「装了全部依赖」的环境下都能跑：
 
 ```
-系统 python（仅核心）         208 tests, OK (skipped=14)
-venv（playwright+Pillow+pyyaml）208 tests, OK (skipped=1)
+系统 python（仅核心）         215 tests, OK (skipped=14)
+venv（playwright+Pillow+pyyaml）215 tests, OK (skipped=1)
 ```
 
 | 文件 | 覆盖 |
