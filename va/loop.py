@@ -112,6 +112,16 @@ class Agent:
     def plan(self) -> Plan | None:
         return self.plan_board.plan
 
+    def set_model(self, name: str) -> None:
+        """切换模型。
+
+        要重建 LLM 客户端，并且**同步给 agent_ctx**——否则委派出去的子 agent
+        还在用旧模型，而这一点从主对话里完全看不出来。
+        """
+        self.cfg.model = name
+        self.llm = LLM(self.cfg)
+        self.agent_ctx.llm = self.llm
+
     def reset(self) -> None:
         self.messages = [self._system_message()]
         self.compactions = 0

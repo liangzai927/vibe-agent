@@ -39,6 +39,59 @@ cp .env.example .env                        # 或用 python3 setup_key.py 安全
 python3 run.py
 ```
 
+### 配置模型服务
+
+第一次启动会**自动进入配置向导**（检测到没配 key 且在交互式终端里）：
+
+```bash
+python3 run.py
+```
+
+向导会问三件事，然后把服务商支持的模型清单拉下来存好：
+
+```
+  选一个模型服务：
+    [1] DeepSeek     https://api.deepseek.com/v1
+    [2] OpenAI       https://api.openai.com/v1
+    [3] 本地 Ollama    http://localhost:11434/v1
+    [4] 自定义          （手动填写）
+
+  > 1
+  粘贴 DeepSeek 的 API key: （不回显）
+
+  正在向 https://api.deepseek.com/v1 查询可用模型…
+  ✓ 拿到 2 个模型，其中 1 个能读图
+
+  发现 2 个可用模型：
+    [ 1] deepseek-chat  ← 建议
+    [ 2] deepseek-flash  ← 可读图
+    DeepSeek-V4.1-Flash  1048k 上下文  可读图
+
+  选哪个？输入序号或模型名，回车用「deepseek-chat」:
+
+  ✓ 发现能读图的模型：deepseek-flash
+    用它做视觉模型，agent 就能读懂设计图上的文字和语义。
+    同一个 key 就能用，不需要另外申请。
+  用它做视觉模型吗？[Y/n]
+```
+
+也可以显式跑：
+
+```bash
+python3 run.py setup              # 或 python3 setup_key.py
+python3 run.py setup --force      # 已经配过也想重配
+```
+
+**模型清单会缓存下来**（`.models.json`），之后换模型不用再翻文档：
+
+```
+› /models        # 列出所有可用模型，标注哪些能读图
+› /model deepseek-flash   # 切换，并写进 .env 持久化
+```
+
+> 顺带一提：**视觉模型不一定非要另开一家**。上面这个例子里 DeepSeek 自己的
+> `deepseek-flash` 就支持图片输入，同一个 key 就能用来读设计稿。
+
 ### 先自检一下
 
 不管用哪种方式，先跑这个，它会告诉你这台机器还缺什么、怎么装：
@@ -211,7 +264,7 @@ docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
 | `VA_API_KEY` | — | API key（也接受 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`） |
 | `VA_BASE_URL` | `https://api.deepseek.com/v1` | 任何 OpenAI 兼容接口 |
 | `VA_MODEL` | `deepseek-chat` | 主模型，需支持 function calling |
-| `VA_VISION_MODEL` | — | 视觉模型，UI 比对用（主模型多不支持读图） |
+| `VA_VISION_MODEL` | — | 视觉模型，读设计稿用。**可以是同一家的多模态模型**，不必另开账号 |
 | `VA_VISION_BASE_URL` | 同 `VA_BASE_URL` | 视觉模型接口 |
 | `VA_VISION_API_KEY` | 同 `VA_API_KEY` | 视觉模型 key |
 | `VA_WORKSPACE` | `/workspace` | agent 的工作区（沙箱根目录） |

@@ -133,3 +133,41 @@ class Config:
                 "  方式一：在项目根目录创建 .env（参考 .env.example）\n"
                 "  方式二：export VA_API_KEY=sk-xxx\n"
             )
+
+
+def write_env_values(path: Path, values: dict[str, str]) -> Path:
+    """把键值写进 .env，**保留文件里已有的其他内容和注释**。
+
+    刻意做原地更新而不是重写整个文件——用户可能在里面写了自己的注释、
+    临时开关、别的服务的 key，重写会把这些冲掉。
+
+    已存在的键就地替换；不存在的追加到末尾。写完全文件权限设为 600。
+    """
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    remaining = dict(values)
+
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
+        # 被注释掉的同名键也一起替换——否则用户会看到两个同名项，搞不清哪个生效
+        bare = key[2:].strip() if key.startswith("# ") else key
+        if bare in remaining:
+            out.append(f"{bare}={remaining.pop(bare)}")
+        else:
+            out.append(line)
+
+    if remaining:
+        if out and out[-1].strip():
+            out.append("")
+        for key, value in remaining.items():
+            out.append(f"{key}={value}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)  # 里面有 key
+    except OSError:
+        pass
+    return path

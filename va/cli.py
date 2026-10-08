@@ -18,7 +18,7 @@ from .prompts import build_system_prompt
 from .session import SessionStore, git_head
 from .tools import build_registry
 from .ui import UI
-from .util import bold, dim, red, yellow
+from .util import bold, cyan, dim, green, red, yellow
 from .workspace import Workspace, WorkspaceError
 
 HELP = """可用命令：
@@ -27,6 +27,8 @@ HELP = """可用命令：
   /diff            查看本次会话至今所有文件改动（对比会话开始前）
   /feature <需求>  跑一遍功能开发流水线（建分支→规划→编码→自测→自审→提交）
   /plan            查看当前任务计划
+  /models          列出服务商支持的所有模型
+  /model [名字]     查看或切换模型（会写进 .env 持久化）
   /undo [N]        撤销最近 N 步的文件改动（默认 1 步）
   /checkpoints     列出可撤销的步骤
   /sessions        列出本项目的历史会话
@@ -39,6 +41,7 @@ HELP = """可用命令：
 其他任何输入都会作为任务交给 agent。
 
 子命令：
+  python3 run.py setup                                      首次配置（也可以直接启动，没配会自己引导）
   python3 run.py doctor [--offline] [--quick] [--json]     环境自检
   python3 run.py feature "需求描述" [--doc X --design Y]    功能开发流水线
 """
@@ -117,12 +120,12 @@ def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
 
     # 子命令不是交给 agent 的任务 —— 提前拦截
-    for name in ("doctor", "feature"):
+    for name, handler in (("doctor", _doctor), ("feature", _feature), ("setup", _setup)):
         split = split_subcommand(raw, name)
         if split is None:
             continue
         head, tail = split
-        return _doctor(head + tail) if name == "doctor" else _feature(head + tail)
+        return handler(head + tail)
 
     args = build_parser().parse_args(raw)
     cfg = Config.load(args.workspace)
@@ -150,6 +153,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(build_system_prompt(workspace, preview_registry.catalog()))
         return 0
+
+    # 第一次用：还没配 key 又是在交互式终端里，直接把向导跑起来。
+    # 报一句「缺少 API key」然后退出，对第一次上手的人毫无帮助。
+    if not cfg.api_key and not args.task and sys.stdin.isatty():
+        from .setup import run as run_setup
+
+        result = run_setup(workspace.root / ".env", directory=Path(__file__).resolve().parent.parent)
+        if not result.ok:
+            print(red(f"配置未完成：{result.error}"), file=sys.stderr)
+            return 2
+        cfg = Config.load(args.workspace)
 
     cfg.require_key()
 
@@ -353,6 +367,14 @@ def _handle_command(raw: str, agent: Agent, ui: UI) -> bool:
         _show_checkpoints(agent, ui)
         return False
 
+    if command == "/models":
+        _show_models(agent, ui)
+        return False
+
+    if command == "/model":
+        _switch_model(agent, ui, rest.strip())
+        return False
+
     if command == "/plan":
         plan = agent.plan
         if plan is None:
@@ -478,6 +500,119 @@ def _doctor(argv: list[str]) -> int:
         quick=args.quick,
         as_json=args.as_json,
     )
+
+
+# --------------------------------------------------------------------- setup
+
+
+def _setup(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="va setup",
+        description="配置模型服务：填 key 和地址，把可用模型拉下来存着",
+    )
+    parser.add_argument("-C", "--workspace", help="工作区目录（用于确定 .env 放哪）")
+    parser.add_argument("--api-key", help="直接给 key（默认交互录入）")
+    parser.add_argument("--base-url", help="服务地址")
+    parser.add_argument("--model", help="默认模型（不给就取拉到的第一个）")
+    parser.add_argument("--vision-model", help="多模态模型（可选）")
+    parser.add_argument("--no-verify", action="store_true", help="跳过连通性验证")
+    parser.add_argument("--force", action="store_true", help="已有配置时也重跑")
+    args = parser.parse_args(argv)
+
+    from .setup import run as run_setup
+
+    directory = Path(__file__).resolve().parent.parent
+    env_path = directory / ".env"
+
+    if env_path.is_file() and not args.force:
+        print(dim(f"  {env_path} 已存在。要重新配置加 --force；"))
+        print(dim("  只想换模型的话，进入 agent 后用 /model 就行。"))
+        return 0
+
+    result = run_setup(
+        env_path,
+        directory=directory,
+        api_key=args.api_key or "",
+        base_url=args.base_url or "",
+        model=args.model or "",
+        vision_model=args.vision_model or "",
+        verify=not args.no_verify,
+    )
+    if not result.ok:
+        print(red(f"配置失败：{result.error}"), file=sys.stderr)
+        return 2
+    if not result.verified:
+        print(dim("  配置已写入，但连通性没验证通过。改好后跑一次 doctor 确认。"))
+    return 0
+
+
+# --------------------------------------------------------------------- 模型切换
+
+
+def _show_models(agent: Agent, ui: UI) -> None:
+    from .models import load_catalog
+
+    catalog = load_catalog(Path(__file__).resolve().parent.parent)
+    if catalog is None or not catalog.models:
+        ui.info("还没有模型清单。")
+        ui.info("进入 agent 前跑一次 `python3 run.py setup` 就能拉下来。")
+        return
+
+    current = agent.cfg.model
+    vision = agent.cfg.vision_model
+    print(dim(f"  服务    {catalog.base_url}"))
+    print(dim(f"  拉取于  {catalog.age_text}（共 {len(catalog.models)} 个）"))
+    print()
+    for model in catalog.models:
+        tags = []
+        if model.id == current:
+            tags.append(cyan("当前主模型"))
+        if vision and model.id == vision:
+            tags.append(green("视觉模型"))
+        elif model.supports_image:
+            tags.append("可读图")
+        suffix = "  ← " + " / ".join(tags) if tags else ""
+        print(f"    {model.id}{suffix}")
+        if model.summary and model.summary != model.id:
+            print(dim(f"        {model.summary}"))
+    print()
+    if not vision:
+        candidates = [m.id for m in catalog.vision_candidates]
+        if candidates:
+            print(dim(f"  提示：{candidates[0]} 能读图。配成视觉模型后就能参考设计稿了："))
+            print(dim(f"        在 .env 里加 VA_VISION_MODEL={candidates[0]}"))
+            print()
+    print(dim("  用 /model <名字> 切换"))
+
+
+def _switch_model(agent: Agent, ui: UI, name: str) -> None:
+    from .config import write_env_values
+    from .models import load_catalog
+
+    if not name:
+        ui.info(f"当前模型：{agent.cfg.model}")
+        catalog = load_catalog(Path(__file__).resolve().parent.parent)
+        if catalog and catalog.models:
+            ui.info(f"可切换 {len(catalog.ids)} 个，用 /models 查看")
+        return
+
+    if name == agent.cfg.model:
+        ui.info(f"已经是 {name} 了")
+        return
+
+    catalog = load_catalog(Path(__file__).resolve().parent.parent)
+    if catalog and catalog.models and name not in catalog.ids:
+        # 不在清单里不直接拒绝——清单可能是旧的，或者用户就是想试个新的
+        ui.warn(f"{name} 不在已缓存的清单里（可能清单过期了）。仍然切过去。")
+
+    agent.set_model(name)
+    ui.success(f"已切换到 {name}")
+
+    try:
+        write_env_values(Path(__file__).resolve().parent.parent / ".env", {"VA_MODEL": name})
+        ui.info("已写进 .env，下次启动还是这个模型")
+    except OSError as exc:
+        ui.warn(f"写 .env 失败（本次会话仍生效）：{exc}")
 
 
 # --------------------------------------------------------------------- feature
