@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vibe-agent</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2128; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #4493f8; --green: #3fb950;
+    --red: #f85149; --yellow: #d29922; --purple: #bc8cff;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+
+  /* ---------------------------------------------------------------- 顶栏 */
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 10px 18px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    flex: 0 0 auto; flex-wrap: wrap;
+  }
+  .brand { font-weight: 600; letter-spacing: .3px; }
+  .brand span { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .meta b { color: var(--text); font-weight: 500; }
+  .spacer { flex: 1; }
+  .pill {
+    font-size: 12px; padding: 2px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .pill.busy { color: var(--yellow); border-color: #5c4a1a; }
+  .pill.ready { color: var(--green); border-color: #1f4d2b; }
+  button {
+    font: inherit; color: var(--text); background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px;
+    cursor: pointer;
+  }
+  button:hover { background: #262c36; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button.primary:hover { background: #388bfd; }
+  button.danger { color: var(--red); border-color: #5c2b28; }
+  button.danger:hover { background: #2d1618; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ---------------------------------------------------------------- 主体 */
+  main { flex: 1; overflow-y: auto; padding: 20px 18px 8px; scroll-behavior: smooth; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+
+  .row { margin: 0 0 14px; }
+  .row.user .bubble {
+    background: #1f6feb1a; border: 1px solid #1f6feb44; border-radius: 10px;
+    padding: 10px 14px; white-space: pre-wrap; word-break: break-word;
+  }
+  .row.user .who { color: var(--accent); }
+  .who { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+
+  .assistant { white-space: pre-wrap; word-break: break-word; }
+  .thinking {
+    color: var(--muted); border-left: 2px solid var(--border); padding-left: 10px;
+    margin: 6px 0; font-size: 13px; white-space: pre-wrap; font-style: italic;
+  }
+  .step {
+    color: var(--purple); font-size: 12px; margin: 18px 0 6px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .step::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+  .note { padding: 6px 12px; border-radius: 6px; margin: 6px 0; font-size: 13px; }
+  .note.info    { color: var(--muted); }
+  .note.warn    { color: var(--yellow); background: #d2992212; }
+  .note.error   { color: var(--red); background: #f8514912; }
+  .note.success { color: var(--green); background: #3fb95012; }
+
+  /* 工具调用 */
+  .tool {
+    border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
+    background: var(--panel); overflow: hidden;
+  }
+  .tool > summary {
+    cursor: pointer; padding: 8px 12px; display: flex; align-items: center;
+    gap: 8px; list-style: none; font-family: var(--mono); font-size: 13px;
+  }
+  .tool > summary::-webkit-details-marker { display: none; }
+  .tool > summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+  .tool[open] > summary::before { transform: rotate(90deg); }
+  .tool .name { color: var(--accent); font-weight: 600; }
+  .tool .args { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tool .body {
+    border-top: 1px solid var(--border); padding: 10px 12px;
+    font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap;
+    word-break: break-word; max-height: 420px; overflow: auto; color: #b9c2cc;
+  }
+  .tool.ok > summary .mark { color: var(--green); }
+  .tool.bad > summary .mark { color: var(--red); }
+  .tool.bad { border-color: #5c2b28; }
+
+  /* diff */
+  .diff { font-family: var(--mono); font-size: 12.5px; border: 1px solid var(--border);
+          border-radius: 8px; overflow: hidden; margin: 8px 0; background: var(--panel); }
+  .diff .line { padding: 0 12px; white-space: pre-wrap; word-break: break-all; }
+  .diff .add { background: #3fb9501f; color: #7ee787; }
+  .diff .del { background: #f851491f; color: #ffa198; }
+  .diff .hunk { color: var(--purple); background: #bc8cff12; }
+  .diff .file { color: var(--text); background: var(--panel2); font-weight: 600; }
+
+  /* 计划 */
+  .plan { border: 1px solid #bc8cff44; border-radius: 8px; background: #bc8cff0d;
+          padding: 12px 14px; font-family: var(--mono); font-size: 13px;
+          white-space: pre-wrap; margin: 10px 0; }
+  .plan .head { color: var(--purple); font-weight: 600; font-family: inherit; }
+
+  /* 代码块 */
+  pre { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+        padding: 10px 12px; overflow: auto; font-family: var(--mono); font-size: 12.5px; }
+  code { font-family: var(--mono); font-size: .93em; background: var(--panel2);
+         padding: 1px 5px; border-radius: 4px; }
+  pre code { background: none; padding: 0; }
+
+  /* 审批卡片 */
+  .approval {
+    border: 1px solid #5c4a1a; background: #d299220f; border-radius: 10px;
+    padding: 12px 14px; margin: 10px 0;
+  }
+  .approval h4 { margin: 0 0 8px; color: var(--yellow); font-size: 13px; font-weight: 600; }
+  .approval .acts { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .approval.resolved { opacity: .6; }
+  .approval .verdict { margin-top: 10px; font-size: 13px; }
+
+  /* 拖拽 */
+  #drop {
+    position: fixed; inset: 0; background: #1f6feb22; border: 3px dashed var(--accent);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+    font-size: 18px; color: var(--accent); backdrop-filter: blur(2px);
+  }
+  #drop.on { display: flex; }
+
+  /* 输入区 */
+  footer {
+    flex: 0 0 auto; border-top: 1px solid var(--border); background: var(--panel);
+    padding: 12px 18px 14px;
+  }
+  .composer { max-width: 900px; margin: 0 auto; }
+  .box {
+    display: flex; align-items: flex-end; gap: 10px; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--panel2); padding: 8px 10px;
+  }
+  .box:focus-within { border-color: var(--accent); }
+  textarea {
+    flex: 1; background: none; border: none; color: var(--text); resize: none;
+    font: inherit; outline: none; max-height: 200px; min-height: 24px; line-height: 1.6;
+  }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .hint kbd {
+    background: var(--panel2); border: 1px solid var(--border); border-bottom-width: 2px;
+    border-radius: 4px; padding: 0 5px; font-family: var(--mono); font-size: 11px;
+  }
+  .empty { color: var(--muted); text-align: center; padding: 60px 20px; }
+  .empty h2 { color: var(--text); font-weight: 600; }
+  .empty code { color: var(--accent); }
+  .thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .thumb { position: relative; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .thumb img { display: block; max-height: 70px; max-width: 120px; object-fit: cover; }
+  .thumb button {
+    position: absolute; top: 2px; right: 2px; padding: 0 5px; font-size: 11px;
+    background: #0009; border-color: transparent;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">vibe<span>-agent</span></div>
+  <div class="meta" id="head-meta"></div>
+  <div class="spacer"></div>
+  <div class="pill" id="status">连接中…</div>
+  <button id="btn-help" title="显示命令">/help</button>
+</header>
+
+<main id="main"><div class="wrap" id="stream">
+  <div class="empty" id="empty">
+    <h2>开始吧</h2>
+    <p>直接描述你想做的事。需要给设计稿就把图片<strong>拖到这个窗口里</strong>。</p>
+    <p>输入 <code>/help</code> 看命令。</p>
+  </div>
+</div></main>
+
+<footer>
+  <div class="composer">
+    <div class="box">
+      <textarea id="input" rows="1" placeholder="描述任务…  （Enter 发送，Shift+Enter 换行）"></textarea>
+      <button class="primary" id="send">发送</button>
+    </div>
+    <div id="thumbs" class="thumbs"></div>
+    <div class="hint">
+      <span><kbd>Enter</kbd> 发送</span>
+      <span><kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+      <span>拖入图片即可作为设计稿</span>
+      <span id="upload-hint"></span>
+    </div>
+  </div>
+</footer>
+
+<div id="drop">松手即可上传图片</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- 状态
+let lastSeq = 0;
+let current = null;        // 当前流式气泡
+let currentKind = null;    // "text" | "thinking"
+let lastPlan = null;       // 计划卡片，原地更新
+let pendingApproval = null;
+const attached = [];       // 已上传的图片路径
+
+const $ = (id) => document.getElementById(id);
+const stream = $("stream");
+const main = $("main");
+const input = $("input");
+
+// ---------------------------------------------------------------- 工具
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// 极简 markdown：先转义，再只认代码围栏、行内代码、加粗。
+// 不引第三方库——这东西要能离线跑。
+function renderMarkdown(text) {
+  const blocks = [];
+  let escaped = escapeHtml(text);
+  escaped = escaped.replace(/```([\s\S]*?)```/g, (_, code) => {
+    blocks.push(`<pre><code>${code.replace(/^\w*\n/, "")}</code></pre>`);
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+  escaped = escaped
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  return escaped.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[+i]);
+}
+
+function atBottom() {
+  return main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+}
+
+function scrollDown(force) {
+  if (force || atBottom()) main.scrollTop = main.scrollHeight;
+}
+
+function hideEmpty() {
+  const empty = $("empty");
+  if (empty) empty.remove();
+}
+
+function addRow(cls) {
+  hideEmpty();
+  const row = document.createElement("div");
+  row.className = "row " + (cls || "");
+  const wrap = document.createElement("div");
+  wrap.className = "wrap";
+  row.appendChild(wrap);
+  stream.appendChild(row);
+  return wrap;
+}
+
+// ---------------------------------------------------------------- 渲染
+
+function pushUser(text) {
+  const wrap = addRow("user");
+  wrap.innerHTML = `<div class="who">你</div><div class="bubble"></div>`;
+  wrap.querySelector(".bubble").textContent = text;
+  scrollDown(true);
+}
+
+function ensureStream(kind) {
+  if (current && currentKind === kind) return current;
+  closeStream();
+  const wrap = addRow();
+  const div = document.createElement("div");
+  div.className = kind === "thinking" ? "thinking" : "assistant";
+  div._raw = "";                 // 攒原文，结束时统一渲染成 markdown
+  wrap.appendChild(div);
+  current = div;
+  currentKind = kind;
+  return current;
+}
+
+function closeStream() {
+  // 流式过程中只 append 纯文本（快且不用反复重排），
+  // 等这一段结束再整体渲染一次 markdown，代码块才有样式。
+  if (current && currentKind === "text" && current._raw) {
+    current.innerHTML = renderMarkdown(current._raw);
+  }
+  current = null;
+  currentKind = null;
+}
+
+function pushNote(level, text) {
+  closeStream();
+  const wrap = addRow();
+  const div = document.createElement("div");
+  div.className = "note " + level;
+  div.textContent = text;
+  wrap.appendChild(div);
+  scrollDown();
+}
+
+function pushStep(step) {
+  closeStream();
+  const wrap = addRow();
+  const div = document.createElement("div");
+  div.className = "step";
+  div.textContent = `第 ${step} 步`;
+  wrap.appendChild(div);
+  scrollDown();
+}
+
+let lastTool = null;
+
+function pushToolCall(ev) {
+  closeStream();
+  const wrap = addRow();
+  const details = document.createElement("details");
+  details.className = "tool";
+  details.open = false;
+  const label = ev.total > 1 ? `[${ev.index}/${ev.total}] ` : "";
+  details.innerHTML =
+    `<summary><span class="mark">⋯</span><span class="name">${escapeHtml(ev.name)}</span>` +
+    `<span class="args">${escapeHtml(ev.summary || "")}</span></summary>` +
+    `<div class="body"></div>`;
+  details._label = label;
+  wrap.appendChild(details);
+  lastTool = details;
+  scrollDown();
+  return details;
+}
+
+function fillToolResult(ev) {
+  const target = lastTool;
+  if (!target) return;
+  target.classList.add(ev.ok ? "ok" : "bad");
+  const mark = target.querySelector(".mark");
+  if (mark) mark.textContent = ev.ok ? "✓" : "✗";
+  target.querySelector(".body").textContent = ev.text || "(空)";
+  if (!ev.ok) target.open = true;   // 失败的要直接展开，别让人去点
+  lastTool = null;
+  scrollDown();
+}
+
+function renderDiff(text) {
+  closeStream();
+  const wrap = addRow();
+  const box = document.createElement("div");
+  box.className = "diff";
+  for (const line of String(text).split("\n")) {
+    const div = document.createElement("div");
+    div.className = "line";
+    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") ||
+        line.startsWith("Index:")) div.classList.add("file");
+    else if (line.startsWith("@@")) div.classList.add("hunk");
+    else if (line.startsWith("+")) div.classList.add("add");
+    else if (line.startsWith("-")) div.classList.add("del");
+    div.textContent = line || " ";
+    box.appendChild(div);
+  }
+  wrap.appendChild(box);
+  scrollDown();
+}
+
+function renderBlock(title, rows) {
+  closeStream();
+  const wrap = addRow();
+  const details = document.createElement("details");
+  details.className = "tool";
+  details.innerHTML = `<summary><span class="mark">≡</span><span class="name">${escapeHtml(title)}</span></summary>`;
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = rows.map(([k, v]) => `${k}  ${v}`).join("\n");
+  details.appendChild(body);
+  wrap.appendChild(details);
+  scrollDown();
+}
+
+function renderPlan(text) {
+  closeStream();
+  if (lastPlan && lastPlan.parentNode) lastPlan.parentNode.remove();
+  const wrap = addRow();
+  const box = document.createElement("div");
+  box.className = "plan";
+  box.textContent = text;
+  wrap.appendChild(box);
+  lastPlan = box;
+  scrollDown();
+}
+
+function renderApproval(ev) {
+  closeStream();
+  const wrap = addRow();
+  const card = document.createElement("div");
+  card.className = "approval";
+  card.dataset.id = ev.id;
+
+  let body = "";
+  if (ev.preview) {
+    body = `<div class="diff">${String(ev.preview).split("\n").map((line) => {
+      let cls = "line";
+      if (line.startsWith("@@")) cls += " hunk";
+      else if (line.startsWith("+")) cls += " add";
+      else if (line.startsWith("-")) cls += " del";
+      return `<div class="${cls}">${escapeHtml(line) || " "}</div>`;
+    }).join("")}</div>`;
+  } else {
+    body = `<div class="body" style="font-family:var(--mono);font-size:12.5px;white-space:pre-wrap">${
+      escapeHtml(Object.entries(ev.args || {}).map(([k, v]) => {
+        const s = String(v); return `${k} = ${s.length > 400 ? s.slice(0, 400) + "…" : s}`;
+      }).join("\n"))}</div>`;
+  }
+
+  card.innerHTML =
+    `<h4>⚠ 需要确认：${escapeHtml(ev.tool)}</h4>` +
+    `<div class="meta" style="margin-bottom:8px">${escapeHtml(ev.detail || "")}</div>` +
+    body +
+    `<div class="acts">
+       <button class="primary" data-a="y">执行</button>
+       <button data-a="a">本次会话总是允许</button>
+       <button class="danger" data-a="n">拒绝</button>
+     </div>`;
+  wrap.appendChild(card);
+  pendingApproval = ev.id;
+
+  card.querySelectorAll("button[data-a]").forEach((btn) => {
+    btn.addEventListener("click", () => answerApproval(ev.id, btn.dataset.a, card));
+  });
+
+  // 有审批时把窗口拉到最前，不然用户不知道在等他
+  window.focus();
+  scrollDown(true);
+}
+
+async function answerApproval(id, answer, card) {
+  card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  const verdict = document.createElement("div");
+  verdict.className = "verdict";
+  verdict.textContent = answer === "n" ? "已拒绝" : answer === "a" ? "已允许（本次会话不再询问）" : "已允许";
+  card.appendChild(verdict);
+  if (pendingApproval === id) pendingApproval = null;
+  try {
+    await fetch("/api/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, answer }),
+    });
+  } catch (err) {
+    verdict.textContent = "提交失败：" + err;
+  }
+}
+
+function handle(ev) {
+  switch (ev.type) {
+    case "banner":
+      $("head-meta").innerHTML =
+        `<b>${escapeHtml(ev.model)}</b> · ${escapeHtml(ev.workspace)}`;
+      break;
+    case "user":          pushUser(ev.text); break;
+    case "step":          pushStep(ev.step); break;
+    case "text_delta": {
+      const el = ensureStream("text");
+      el._raw += ev.piece;
+      el.textContent = el._raw;
+      scrollDown();
+      break;
+    }
+    case "thinking_delta": {
+      const el = ensureStream("thinking");
+      el._raw += ev.piece;
+      el.textContent = el._raw;
+      scrollDown();
+      break;
+    }
+    case "message_end":   closeStream(); break;
+    case "note":          pushNote(ev.level || "info", ev.text); break;
+    case "tool_call":     pushToolCall(ev); break;
+    case "tool_result":   fillToolResult(ev); break;
+    case "diff":          renderDiff(ev.text); break;
+    case "plan":          renderPlan(ev.text); break;
+    case "block":         renderBlock(ev.title, ev.rows || []); break;
+    case "rule":          break;
+    case "answer":        closeStream(); if (ev.text) pushNote("info", ev.text); break;
+    case "approval":      renderApproval(ev); break;
+    case "approval_done": break;
+    case "task_end":      closeStream(); setStatus(false); break;
+  }
+}
+
+// ---------------------------------------------------------------- SSE
+
+function setStatus(busy) {
+  const el = $("status");
+  el.textContent = busy ? "运行中…" : "空闲";
+  el.className = "pill " + (busy ? "busy" : "ready");
+  $("send").disabled = busy;
+}
+
+function connect() {
+  const source = new EventSource("/api/events?since=" + lastSeq);
+  source.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }
+    if (ev.seq <= lastSeq) return;   // 重连时可能收到重复的
+    lastSeq = ev.seq;
+    handle(ev);
+  };
+  source.onerror = () => {
+    $("status").textContent = "重连中…";
+    $("status").className = "pill busy";
+    // EventSource 自己会重连；这里不清 lastSeq，重连后按序号补发
+  };
+  source.onopen = async () => {
+    const state = await fetch("/api/state").then((r) => r.json()).catch(() => null);
+    if (state) {
+      setStatus(state.busy);
+      $("head-meta").innerHTML =
+        `<b>${escapeHtml(state.model)}</b> · ${escapeHtml(state.workspace)}`;
+      $("upload-hint").textContent = state.vision_model
+        ? `视觉模型：${state.vision_model}` : "未配视觉模型（inspect_image 仍可用）";
+    }
+  };
+}
+
+// ---------------------------------------------------------------- 发送
+
+async function send() {
+  const text = input.value.trim();
+  const images = attached.slice();
+  if (!text && !images.length) return;
+
+  // 附件以路径形式追加——agent 只认路径，不认浏览器里的二进制
+  const payload = images.length
+    ? (text ? text + "\n\n" : "") + images.map((p) => p.relative).join("\n")
+    : text;
+
+  input.value = "";
+  autosize();
+  attached.length = 0;
+  renderThumbs();
+
+  setStatus(true);
+  try {
+    const res = await fetch("/api/message", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: payload }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      pushNote("warn", data.message || "没能提交");
+      setStatus(false);
+    }
+    input.focus();
+  } catch (err) {
+    pushNote("error", "发送失败：" + err);
+    setStatus(false);
+  }
+}
+
+$("send").addEventListener("click", send);
+$("btn-help").addEventListener("click", () => {
+  input.value = "/help";
+  send();
+});
+
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+input.addEventListener("input", autosize);
+
+function autosize() {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 200) + "px";
+}
+
+// ---------------------------------------------------------------- 图片
+
+function renderThumbs() {
+  const box = $("thumbs");
+  box.innerHTML = "";
+  attached.forEach((item, index) => {
+    const div = document.createElement("div");
+    div.className = "thumb";
+    const img = document.createElement("img");
+    // 直接读工作区里的文件，路径是相对的根路径
+    img.src = "/api/raw?path=" + encodeURIComponent(item.relative);
+    img.alt = item.relative;
+    const del = document.createElement("button");
+    del.textContent = "×";
+    del.title = "移除";
+    del.addEventListener("click", () => {
+      attached.splice(index, 1);
+      renderThumbs();
+    });
+    div.appendChild(img);
+    div.appendChild(del);
+    box.appendChild(div);
+  });
+}
+
+async function upload(file) {
+  if (!file.type.startsWith("image/")) {
+    pushNote("warn", `只支持图片，收到的是 ${file.type || "未知类型"}`);
+    return;
+  }
+  pushNote("info", `正在上传 ${file.name}…`);
+  try {
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "X-Filename": encodeURIComponent(file.name || "clip.png") },
+      body: file,
+    });
+    const data = await res.json();
+    if (!data.ok) { pushNote("error", data.error || "上传失败"); return; }
+    attached.push(data);
+    renderThumbs();
+  } catch (err) {
+    pushNote("error", "上传失败：" + err);
+  }
+}
+
+const drop = $("drop");
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) {
+    dragDepth++;
+    drop.classList.add("on");
+  }
+});
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("dragleave", () => {
+  if (--dragDepth <= 0) { dragDepth = 0; drop.classList.remove("on"); }
+});
+window.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  drop.classList.remove("on");
+  const files = [...(e.dataTransfer?.files || [])];
+  files.forEach(upload);
+});
+
+// 直接往输入框里 Ctrl+V 一张图也接住
+input.addEventListener("paste", (e) => {
+  const items = [...(e.clipboardData?.items || [])];
+  const image = items.find((it) => it.type.startsWith("image/"));
+  if (image) {
+    e.preventDefault();
+    const file = image.getAsFile();
+    if (file) upload(file);
+  }
+});
+
+// ---------------------------------------------------------------- 启动
+connect();
+input.focus();
+</script>
+</body>
+</html>

@@ -523,6 +523,64 @@ class TestCompose(unittest.TestCase):
         )
 
 
+class TestComposeWebService(unittest.TestCase):
+    """浏览器界面在容器里的配置。
+
+    这块最容易出的两类问题：忘了透传 key（终端能跑、界面起不来），
+    以及把端口暴露到局域网（这 agent 能执行任意命令）。
+    """
+
+    def setUp(self) -> None:
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("需要 pyyaml")
+        self.data = yaml.safe_load(read(COMPOSE))
+        self.services = self.data["services"]
+        if "va-web" not in self.services:
+            self.fail("compose 里没有 va-web 服务")
+
+    def test_all_services_share_the_same_environment(self):
+        """web 服务漏一个 VA_API_KEY，就是「终端好好的、界面起不来」。"""
+        envs = {
+            name: set(service.get("environment") or ())
+            for name, service in self.services.items()
+        }
+        reference = envs["va"]
+        for name, env in envs.items():
+            missing = reference - env
+            self.assertFalse(missing, f"{name} 少了这些环境变量：{sorted(missing)}")
+
+    def test_publishes_a_port(self):
+        ports = self.services["va-web"].get("ports") or []
+        self.assertTrue(ports, "va-web 必须映射端口，否则宿主机访问不到")
+        self.assertTrue(any("8420" in str(p) for p in ports))
+
+    def test_port_binds_to_loopback_only(self):
+        """这东西能执行任意命令，绝不能默认暴露到局域网。"""
+        ports = [str(p) for p in self.services["va-web"].get("ports") or []]
+        for published in ports:
+            self.assertTrue(
+                published.startswith("127.0.0.1:"),
+                f"端口映射 {published!r} 没有绑定回环地址——会把 agent 暴露给整个局域网",
+            )
+
+    def test_command_listens_on_all_interfaces_inside_the_container(self):
+        """容器里的 127.0.0.1 从宿主机是访问不到的，必须监听 0.0.0.0。"""
+        command = self.services["va-web"].get("command") or []
+        joined = " ".join(command)
+        self.assertIn("web", joined)
+        self.assertIn("0.0.0.0", joined)
+        self.assertIn("--no-browser", joined, "容器里没有浏览器可控")
+
+    def test_uses_the_same_image(self):
+        self.assertEqual(
+            self.services["va-web"].get("image"),
+            self.services["va"].get("image"),
+            "两个服务应该跑同一个镜像，否则要构建两次",
+        )
+
+
 class TestEnvVarConsistency(unittest.TestCase):
     """代码读的环境变量和 compose 透传的变量必须对得上。
 
@@ -535,7 +593,12 @@ class TestEnvVarConsistency(unittest.TestCase):
             import yaml
         except ImportError:
             self.skipTest("需要 pyyaml")
-        self.compose_env = set(yaml.safe_load(read(COMPOSE))["services"]["va"]["environment"])
+        self.services = yaml.safe_load(read(COMPOSE))["services"]
+        # 取所有服务透传变量的并集。锚点让它们现在是一致的，但那是「约定」
+        # 不是「保证」——下面 TestCompose 里另有一条测试专门盯着这件事。
+        self.compose_env = set()
+        for service in self.services.values():
+            self.compose_env |= set(service.get("environment") or ())
 
     @staticmethod
     def _env_vars_read_by_code() -> set[str]:

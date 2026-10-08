@@ -8,6 +8,9 @@
 #   docker compose run --rm va -c                    # 接着上次的会话
 #   docker compose run --rm va doctor                # 自检环境
 #
+# 浏览器界面（可视化，支持拖拽传图）：
+#   docker compose up va-web        # 然后打开 http://127.0.0.1:8420
+#
 # 工作区默认用当前目录；要指定别的仓库：
 #   WORKSPACE=/path/to/repo docker compose run --rm va
 #
@@ -20,64 +23,84 @@
 
 name: vibe-agent
 
+# 公共部分抽出来，终端服务和 web 服务共用同一套挂载与环境。
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      WITH_NODE: "${WITH_NODE:-1}"
+      WITH_BROWSER: "${WITH_BROWSER:-1}"
+  image: "vibe-agent:${TAG:-latest}"
+  stdin_open: true
+  tty: true
+  working_dir: /workspace
+  volumes:
+    # 你的代码仓库
+    - "${WORKSPACE:-.}:/workspace"
+    # 容器内家目录：git 配置、各类缓存。用命名卷避免每次重建都重下东西
+    - va-home:/home/va
+  environment: &common-env
+    # ---- 模型 ----
+    # VA_* 是首选；下面三个别名是 config.py 支持的兜底，
+    # 一起透传才能保证「本地怎么配、容器里就怎么生效」
+    - VA_API_KEY
+    - OPENAI_API_KEY
+    - DEEPSEEK_API_KEY
+    - VA_BASE_URL
+    - OPENAI_BASE_URL
+    - VA_MODEL
+    - VA_TEMPERATURE
+    - VA_MAX_ITERATIONS
+    - VA_MAX_TOKENS
+    - VA_MAX_DELEGATE_DEPTH
+    - VA_CONTEXT_BUDGET
+    - VA_AUTO_APPROVE
+    - VA_SHOW_THINKING
+    # VA_WORKSPACE 不在这里透传：镜像已经 ENV 设成 /workspace，
+    # 写裸 key 反而会把镜像的值删掉。要改就直接写死值。
+    - VA_SESSION_DIR
+    # ---- 视觉模型（UI 对比用，可选）----
+    - VA_VISION_API_KEY
+    - VA_VISION_BASE_URL
+    - VA_VISION_MODEL
+    # ---- 渲染 ----
+    - VA_BROWSER_CHANNEL
+    - VA_BROWSER_EXECUTABLE
+    - VA_INSTALL_BROWSER
+    # PLAYWRIGHT_BROWSERS_PATH 同上：镜像已设，透传裸 key 会把它删掉，
+    # 结果 playwright 回落到 ~/.cache 找不到构建时装好的 Chromium。
+    # ---- 容器行为 ----
+    - VA_UID
+    - VA_GID
+    - VA_GIT_SAFE_DIRECTORY
+    # ---- git 身份（agent 要提交代码时必填）----
+    - GIT_USER_NAME
+    - GIT_USER_EMAIL
+
 services:
+  # 终端模式。用 `docker compose run --rm va ...`
+  #
+  # 刻意不给它挂 profiles：那是个没验证过的假设，而这个开发机没装 Docker，
+  # 万一 profiles 会让 `docker compose run va` 失效，等于把主流程弄坏了。
+  # 代价只是 `docker compose up` 会同时拉起它——所以请明确写成
+  # `docker compose up va-web`。
   va:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        WITH_NODE: "${WITH_NODE:-1}"
-        WITH_BROWSER: "${WITH_BROWSER:-1}"
-    image: "vibe-agent:${TAG:-latest}"
-    stdin_open: true
-    tty: true
-    working_dir: /workspace
+    <<: *common
     # 不设 container_name：那会让两个 `docker compose run` 并发冲突。
     # 也不设 init：ENTRYPOINT 里的 tini 已经在做 PID 1 该做的事。
 
-    volumes:
-      # 你的代码仓库
-      - "${WORKSPACE:-.}:/workspace"
-      # 容器内家目录：git 配置、各类缓存。用命名卷避免每次重建都重下东西
-      - va-home:/home/va
-
-    environment:
-      # ---- 模型 ----
-      # VA_* 是首选；下面三个别名是 config.py 支持的兜底，
-      # 一起透传才能保证「本地怎么配、容器里就怎么生效」
-      - VA_API_KEY
-      - OPENAI_API_KEY
-      - DEEPSEEK_API_KEY
-      - VA_BASE_URL
-      - OPENAI_BASE_URL
-      - VA_MODEL
-      - VA_TEMPERATURE
-      - VA_MAX_ITERATIONS
-      - VA_MAX_TOKENS
-      - VA_MAX_DELEGATE_DEPTH
-      - VA_CONTEXT_BUDGET
-      - VA_AUTO_APPROVE
-      - VA_SHOW_THINKING
-      # VA_WORKSPACE 不在这里透传：镜像已经 ENV 设成 /workspace，
-      # 写裸 key 反而会把镜像的值删掉。要改就直接写死值。
-      - VA_SESSION_DIR
-      # ---- 视觉模型（UI 对比用，可选）----
-      - VA_VISION_API_KEY
-      - VA_VISION_BASE_URL
-      - VA_VISION_MODEL
-      # ---- 渲染 ----
-      - VA_BROWSER_CHANNEL
-      - VA_BROWSER_EXECUTABLE
-      - VA_INSTALL_BROWSER
-      # PLAYWRIGHT_BROWSERS_PATH 同上：镜像已设，透传裸 key 会把它删掉，
-      # 结果 playwright 回落到 ~/.cache 找不到构建时装好的 Chromium。
-      # ---- 容器行为 ----
-      - VA_UID
-      - VA_GID
-      - VA_GIT_SAFE_DIRECTORY
-      # ---- git 身份（agent 要提交代码时必填）----
-      - GIT_USER_NAME
-      - GIT_USER_EMAIL
+  # 浏览器界面。用 `docker compose up va-web`
+  va-web:
+    <<: *common
+    command: ["web", "--no-browser", "--host", "0.0.0.0", "--port", "8420"]
+    # 注意 host 必须是 0.0.0.0：容器里的 127.0.0.1 从宿主机访问不到。
+    # 端口只映射到宿主机的回环地址，不要把能执行任意命令的东西暴露到局域网。
+    ports:
+      - "127.0.0.1:${VA_WEB_PORT:-8420}:8420"
+    # web 模式不需要 keepalive 的 stdin，但留着无害
+    restart: unless-stopped
 
 volumes:
   va-home:
+

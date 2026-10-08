@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import os
 import sys
 
@@ -47,6 +49,18 @@ def _supports_color() -> bool:
 
 
 _COLOR = _supports_color()
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def strip_ansi(text: str) -> str:
+    """去掉 ANSI 转义序列。
+
+    终端里着色过的文本（比如 diff）要发到浏览器时必须先剥掉——
+    否则用户会看到一堆 \x1b[32m。
+    """
+    return _ANSI_RE.sub("", text)
 
 
 def c(text: str, code: str) -> str:

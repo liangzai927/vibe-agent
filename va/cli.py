@@ -46,6 +46,7 @@ HELP = """可用命令：
 图片路径。终端本身传不了图片数据，所以用这个标记来「粘贴」。
 
 子命令：
+  python3 run.py web                                        浏览器界面（可视化，支持拖拽传图）
   python3 run.py setup                                      首次配置（也可以直接启动，没配会自己引导）
   python3 run.py doctor [--offline] [--quick] [--json]     环境自检
   python3 run.py feature "需求描述" [--doc X --design Y]    功能开发流水线
@@ -125,7 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
 
     # 子命令不是交给 agent 的任务 —— 提前拦截
-    for name, handler in (("doctor", _doctor), ("feature", _feature), ("setup", _setup)):
+    for name, handler in (
+        ("doctor", _doctor),
+        ("feature", _feature),
+        ("setup", _setup),
+        ("web", _web),
+    ):
         split = split_subcommand(raw, name)
         if split is None:
             continue
@@ -512,6 +518,99 @@ def _doctor(argv: list[str]) -> int:
         offline=args.offline,
         quick=args.quick,
         as_json=args.as_json,
+    )
+
+
+# --------------------------------------------------------------------- web
+
+
+def _web(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="va web",
+        description="在浏览器里用 agent：拖拽传图、彩色 diff、点按钮审批",
+    )
+    parser.add_argument("-C", "--workspace", help="工作区目录")
+    parser.add_argument("--port", type=int, default=8420, help="监听端口（被占用会自动换）")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="监听地址。默认只允许本机——这东西能执行任意命令，别暴露到局域网",
+    )
+    parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    parser.add_argument(
+        "--window", action="store_true", help="用原生窗口打开（需要 pip install pywebview）"
+    )
+    parser.add_argument("-y", "--yes", action="store_true", help="自动批准所有操作")
+    parser.add_argument("--model", help="本次使用的模型")
+    parser.add_argument("--base-url", help="本次使用的服务地址")
+    parser.add_argument("--resume", metavar="会话ID", help="恢复指定会话")
+    parser.add_argument("--continue", dest="continue_", action="store_true", help="接着最近的会话")
+    parser.add_argument("--no-session", action="store_true", help="不记录会话")
+    parser.add_argument("--no-git", action="store_true", help="不注册 git 工具")
+    parser.add_argument("--no-render", action="store_true", help="不注册浏览器渲染工具")
+    parser.add_argument("--no-tools", action="store_true", help="不注册任何工具（只聊天）")
+    parser.add_argument("-q", "--quiet", action="store_true", help="不显示思考过程")
+    parser.add_argument("--max-steps", type=int, help="单任务最大步数")
+    args = parser.parse_args(argv)
+
+    cfg = Config.load(args.workspace)
+    if args.model:
+        cfg.model = args.model
+    if args.base_url:
+        cfg.base_url = args.base_url
+    if args.yes:
+        cfg.auto_approve = True
+    if args.quiet:
+        cfg.show_thinking = False
+    if args.max_steps:
+        cfg.max_iterations = args.max_steps
+
+    try:
+        workspace = Workspace(cfg.workspace)
+    except WorkspaceError as exc:
+        print(red(f"工作区错误：{exc}"), file=sys.stderr)
+        return 2
+
+    if not cfg.api_key:
+        print(yellow("还没有配置模型服务。先跑一遍向导："), file=sys.stderr)
+        print(dim("  python3 run.py setup"), file=sys.stderr)
+        return 2
+
+    from .web import WebApp, serve
+
+    app = WebApp(cfg, workspace, auto_approve=cfg.auto_approve)
+
+    # 会话：和终端模式走同一套恢复逻辑，别搞两套
+    session, history, resume_note, saved_plan = _open_session(args, workspace, cfg, app.ui)
+    if history:
+        app.agent.messages = history
+    if saved_plan:
+        from .plan import Plan
+
+        app.agent.plan_board.plan = Plan.from_dict(saved_plan)
+    app.agent.session = session
+
+    app.ui.banner(cfg.model, cfg.base_url, session_id=app.agent.session_id)
+    if resume_note:
+        app.ui.warn(resume_note)
+    if history:
+        app.ui.info(f"已恢复会话（{len(history)} 条消息）")
+
+    print()
+    print(bold("  vibe-agent") + dim("  浏览器界面"))
+    print(dim(f"  工作区  {workspace.root}"))
+    print(dim(f"  模型    {cfg.model}"))
+    if cfg.auto_approve:
+        print(yellow("  ⚡ 自动批准所有操作"))
+    print(dim("  按 Ctrl-C 停止"))
+    print()
+
+    return serve(
+        app,
+        port=args.port,
+        host=args.host,
+        open_browser=not args.no_browser,
+        window=args.window,
     )
 
 
