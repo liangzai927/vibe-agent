@@ -44,10 +44,13 @@ class _GitTool(Tool):
         except subprocess.TimeoutExpired as exc:
             raise ToolError(f"git {' '.join(args)} 超时（>{timeout}s）") from exc
 
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
+        # 注意：绝不能用 strip()。porcelain 格式里行首空格是有语义的
+        # （' M' = 未暂存的修改，'M ' = 已暂存的修改）。strip() 会把第一行的
+        # 状态位吃掉，导致文件名少一个字符、暂存状态判断完全反过来。
+        stdout = (result.stdout or "").rstrip("\n")
+        stderr = (result.stderr or "").rstrip("\n")
         if result.returncode != 0:
-            detail = stderr or stdout or "(无输出)"
+            detail = stderr.strip() or stdout.strip() or "(无输出)"
             raise ToolError(f"git {' '.join(args)} 失败：\n{detail}")
         return stdout or stderr
 
@@ -101,7 +104,10 @@ class GitStatus(_GitTool):
 
         staged, unstaged, untracked = [], [], []
         for line in porcelain.splitlines():
-            code, _, name = line[:2], line[2], line[3:]
+            if len(line) < 4:
+                continue
+            code = line[:2]
+            name = line[3:]  # 前两列是 XY 状态位，第三列是分隔空格
             if code == "??":
                 untracked.append(name)
             else:

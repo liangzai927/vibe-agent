@@ -18,6 +18,7 @@ from va.config import Config  # noqa: E402
 from va.loop import Agent  # noqa: E402
 from va.messages import AssistantTurn, ToolCall  # noqa: E402
 from va.tools import build_registry  # noqa: E402
+from va.tools.git import GitStatus  # noqa: E402
 from va.ui import UI  # noqa: E402
 from va.workspace import Workspace, WorkspaceError  # noqa: E402
 
@@ -557,6 +558,60 @@ class TestGitTools(AgentTestCase):
         agent.run("查状态")
         out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
         self.assertIn("不是一个 git 仓库", out)
+
+    # ------------------------------------------- porcelain 解析回归测试
+    # 背景：真实使用中 git_status 曾把 ' M'（未暂存）误判成 'M '（已暂存），
+    # 并且文件名被吃掉首字符（__pycache__ -> _pycache__）。
+    # 根因是 _git() 对 stdout 做了 strip()，破坏了 porcelain 行首的语义空格。
+
+    def test_porcelain_leading_space_preserved(self):
+        self._init_repo()
+        (self.root / ".gitkeep").write_text("modified")
+        raw = GitStatus(self.workspace)._git("status", "--porcelain=v1", "--untracked-files=all")
+        self.assertTrue(
+            raw.startswith(" M "),
+            f"porcelain 行首状态位被破坏，实际为 {raw[:20]!r}",
+        )
+
+    def test_unstaged_change_not_misreported_as_staged(self):
+        self._init_repo()
+        (self.root / ".gitkeep").write_text("modified")
+        (self.root / "__private.py").write_text("x")  # 未跟踪
+
+        llm = ScriptedLLM(turn("", tc("git_status")), turn("看完了。"))
+        agent, _ = self.make_agent(llm)
+        agent.run("查状态")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+
+        self.assertIn("未暂存", out)
+        self.assertNotIn("已暂存", out, "未暂存的修改被误判成了已暂存")
+        # 文件名不能被吃掉首字符
+        self.assertIn(".gitkeep", out)
+        self.assertIn("__private.py", out)
+
+    def test_staged_change_reported_as_staged(self):
+        self._init_repo()
+        (self.root / ".gitkeep").write_text("modified")
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True, env=self._git_env())
+
+        llm = ScriptedLLM(turn("", tc("git_status")), turn("看完了。"))
+        agent, _ = self.make_agent(llm)
+        agent.run("查状态")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+
+        self.assertIn("已暂存", out)
+        self.assertNotIn("未暂存", out)
+        self.assertIn(".gitkeep", out)
+
+    def test_untracked_file_reported_in_full(self):
+        self._init_repo()
+        (self.root / "new_file.py").write_text("x")
+        llm = ScriptedLLM(turn("", tc("git_status")), turn("看完了。"))
+        agent, _ = self.make_agent(llm)
+        agent.run("查状态")
+        out = [m["content"] for m in agent.messages if m["role"] == "tool"][0]
+        self.assertIn("未跟踪", out)
+        self.assertIn("new_file.py", out)
 
 
 if __name__ == "__main__":
