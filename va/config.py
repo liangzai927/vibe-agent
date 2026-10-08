@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
@@ -55,6 +55,26 @@ class Config:
     show_thinking: bool = True
     # 估算 token 超过这个数就自动压缩历史（按字符数/3 粗估）
     context_budget: int = 60_000
+    # ---- 视觉模型（用于「截图 vs 设计图」比对，可选）----
+    # 主模型多数不支持图片（如 deepseek-chat），所以单独配一个多模态模型。
+    vision_model: str = ""
+    vision_base_url: str = ""
+    vision_api_key: str = ""
+
+    @property
+    def has_vision(self) -> bool:
+        return bool(self.vision_model.strip())
+
+    def vision_config(self) -> "Config":
+        """派生出一个走视觉模型的配置副本（未配置则原样返回）。"""
+        if not self.has_vision:
+            return self
+        return replace(
+            self,
+            model=self.vision_model.strip(),
+            base_url=(self.vision_base_url or self.base_url).strip(),
+            api_key=(self.vision_api_key or self.api_key).strip(),
+        )
 
     @classmethod
     def load(cls, workspace: str | Path | None = None) -> "Config":
@@ -91,6 +111,9 @@ class Config:
             auto_approve=(os.environ.get("VA_AUTO_APPROVE", "").strip().lower() in _TRUTHY),
             show_thinking=(os.environ.get("VA_SHOW_THINKING", "1").strip().lower() in _TRUTHY),
             context_budget=int(os.environ.get("VA_CONTEXT_BUDGET", "60000") or 60000),
+            vision_model=(os.environ.get("VA_VISION_MODEL") or "").strip(),
+            vision_base_url=(os.environ.get("VA_VISION_BASE_URL") or "").strip(),
+            vision_api_key=(os.environ.get("VA_VISION_API_KEY") or "").strip(),
         )
 
     def require_key(self) -> None:

@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import __version__
 from .config import Config
 from .diffview import colorize, make_diff
 from .llm import LLM
@@ -31,6 +32,9 @@ HELP = """可用命令：
   /exit            退出（Ctrl+D 同效）
 
 其他任何输入都会作为任务交给 agent。
+
+环境自检（问「这台机器还缺什么」）：
+  python3 run.py doctor [--offline] [--quick] [--json]
 """
 
 
@@ -46,8 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-y", "--yes", help="自动批准所有需要审批的操作（谨慎）", action="store_true")
     parser.add_argument("-q", "--quiet", help="不显示模型思考过程", action="store_true")
     parser.add_argument("--no-git", help="不注册 git 工具", action="store_true")
+    parser.add_argument("--no-render", help="不注册渲染/截图工具", action="store_true")
     parser.add_argument("--max-steps", type=int, help="单任务最大步数")
     parser.add_argument("--show-prompt", help="打印完整的系统提示词后退出（调试用）", action="store_true")
+    parser.add_argument("-V", "--version", action="version", version=f"vibe-agent {__version__}")
 
     session = parser.add_argument_group("会话")
     session.add_argument("-c", "--continue", dest="continue_", action="store_true", help="继续本项目最近一次会话")
@@ -57,7 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+
+    # doctor 是子命令，不是交给 agent 的任务 —— 提前拦截
+    if raw and raw[0] == "doctor":
+        return _doctor(raw[1:])
+
+    args = build_parser().parse_args(raw)
     cfg = Config.load(args.workspace)
 
     if args.model:
@@ -78,7 +90,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.show_prompt:
-        preview_registry = build_registry(workspace, include_git=not args.no_git)
+        preview_registry = build_registry(
+            workspace, include_git=not args.no_git, include_render=not args.no_render, cfg=cfg
+        )
         print(build_system_prompt(workspace, preview_registry.catalog()))
         return 0
 
@@ -88,7 +102,9 @@ def main(argv: list[str] | None = None) -> int:
 
     session, history, resume_note = _open_session(args, workspace, cfg, ui)
 
-    registry = build_registry(workspace, include_git=not args.no_git)
+    registry = build_registry(
+        workspace, include_git=not args.no_git, include_render=not args.no_render, cfg=cfg
+    )
     agent = Agent(
         cfg,
         ui,
@@ -344,6 +360,45 @@ def build_prompt_preview(cfg: Config, workspace: Workspace, include_git: bool = 
     """调试用：打印实际会发送给模型的系统提示词。"""
     registry = build_registry(workspace, include_git=include_git)
     return build_system_prompt(workspace, registry.catalog())
+
+
+# --------------------------------------------------------------------- doctor
+
+
+def _doctor(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="va doctor",
+        description="检查运行环境：缺什么、怎么装，一次说清楚",
+    )
+    parser.add_argument("-C", "--workspace", help="工作区目录（默认：当前目录）")
+    parser.add_argument("--offline", action="store_true", help="跳过模型连通性检查")
+    parser.add_argument("--quick", action="store_true", help="跳过浏览器实际启动探测（快很多）")
+    parser.add_argument("--json", dest="as_json", action="store_true", help="输出 JSON，便于 CI 消费")
+    args = parser.parse_args(argv)
+
+    cfg = Config.load(args.workspace)
+
+    root = cfg.workspace
+    if not root.exists():
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    try:
+        workspace = Workspace(root)
+    except WorkspaceError as exc:
+        print(red(f"工作区问题：{exc}"), file=sys.stderr)
+        return 1
+
+    from .doctor import run as run_doctor
+
+    return run_doctor(
+        cfg,
+        workspace,
+        offline=args.offline,
+        quick=args.quick,
+        as_json=args.as_json,
+    )
 
 
 if __name__ == "__main__":

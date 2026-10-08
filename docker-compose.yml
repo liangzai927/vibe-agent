@@ -1,0 +1,70 @@
+# vibe-agent 的 compose 配置。
+#
+# 用法：
+#   cp .env.example .env      # 填 VA_API_KEY
+#   docker compose run --rm va                       # 交互模式
+#   docker compose run --rm va "修一下登录页的样式"     # 一次性任务
+#   docker compose run --rm va -c                    # 接着上次的会话
+#   docker compose run --rm va doctor                # 自检环境
+#
+# 工作区默认用当前目录；要指定别的仓库：
+#   WORKSPACE=/path/to/repo docker compose run --rm va
+#
+# 环境变量在这里用「只写 key」的写法：值从宿主机同名变量透传，
+# 宿主机没设就留空，由容器里的 .env 或命令参数兜底。
+
+name: vibe-agent
+
+services:
+  va:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        WITH_NODE: "${WITH_NODE:-1}"
+        WITH_BROWSER: "${WITH_BROWSER:-1}"
+    image: "vibe-agent:${TAG:-latest}"
+    container_name: vibe-agent
+    init: true
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+
+    volumes:
+      # 你的代码仓库
+      - "${WORKSPACE:-.}:/workspace"
+      # 容器内家目录：git 配置、各类缓存。用命名卷避免每次重建都重下东西
+      - va-home:/home/va
+
+    environment:
+      # ---- 模型 ----
+      - VA_API_KEY
+      - VA_BASE_URL
+      - VA_MODEL
+      - VA_TEMPERATURE
+      - VA_MAX_ITERATIONS
+      - VA_MAX_TOKENS
+      - VA_CONTEXT_BUDGET
+      - VA_AUTO_APPROVE
+      - VA_SHOW_THINKING
+      - VA_WORKSPACE
+      - VA_SESSION_DIR
+      # ---- 视觉模型（UI 对比用，可选）----
+      - VA_VISION_API_KEY
+      - VA_VISION_BASE_URL
+      - VA_VISION_MODEL
+      # ---- 渲染 ----
+      - VA_BROWSER_CHANNEL
+      - VA_BROWSER_EXECUTABLE
+      - VA_INSTALL_BROWSER
+      - PLAYWRIGHT_BROWSERS_PATH
+      # ---- 容器行为 ----
+      - VA_UID
+      - VA_GID
+      - VA_GIT_SAFE_DIRECTORY
+      # ---- git 身份（agent 要提交代码时必填）----
+      - GIT_USER_NAME
+      - GIT_USER_EMAIL
+
+volumes:
+  va-home:

@@ -1,0 +1,39 @@
+# 构建上下文里不需要的东西。
+# 这里最重要的是把 .env 和 .va 挡在外面 —— 前者是密钥，后者是历史会话，
+# 都不该被烤进镜像层里。
+
+.git
+.gitignore
+
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# 会话与运行时产物
+.va/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 渲染产物
+*.png
+*.jpg
+*.jpeg
+*.webp
+!docs/**/*.png
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# 容器相关自身
+Dockerfile
+docker-compose.yml
+.dockerignore

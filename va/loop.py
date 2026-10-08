@@ -45,7 +45,7 @@ class Agent:
         self.cfg = cfg
         self.ui = ui
         self.workspace = workspace or Workspace(cfg.workspace)
-        self.registry = registry or build_registry(self.workspace)
+        self.registry = registry or build_registry(self.workspace, cfg=cfg)
         self.llm = llm or LLM(cfg)
         self.session = session
         self.undo = undo or UndoStack(self.workspace.root)

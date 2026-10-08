@@ -101,9 +101,14 @@ class Registry:
 
 def safe_run(tool: Tool, args: dict[str, Any]) -> tuple[str, bool]:
     """执行工具，永不抛出。返回 (结果文本, 是否成功)。"""
+    from ..workspace import WorkspaceError
+
     try:
         return tool.run(**args), True
     except ToolError as exc:
+        return f"错误：{exc}", False
+    except WorkspaceError as exc:
+        # 路径越界 / 文件不存在 —— 这是最高频的一类失败，给干净的提示
         return f"错误：{exc}", False
     except TypeError as exc:
         return (
