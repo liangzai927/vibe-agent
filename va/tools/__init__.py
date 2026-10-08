@@ -6,6 +6,8 @@ from ..config import Config
 from ..plan import PlanBoard
 from ..workspace import Workspace
 from .base import Registry, Tool, ToolError, safe_run
+from .design import DESIGN_TOOLS
+from .document import DOCUMENT_TOOLS
 from .fs import EditFile, ListDir, ReadFile, WriteFile
 from .git import GIT_TOOLS
 from .plan import UpdatePlan
@@ -29,6 +31,8 @@ __all__ = [
     "UpdatePlan",
     "GIT_TOOLS",
     "RENDER_TOOLS",
+    "DOCUMENT_TOOLS",
+    "DESIGN_TOOLS",
 ]
 
 CORE_TOOLS = (ReadFile, WriteFile, EditFile, ListDir, Glob, Grep, RunBash)
@@ -56,4 +60,8 @@ def build_registry(
     if include_render:
         for tool_cls in RENDER_TOOLS:
             registry.register(tool_cls(workspace, cfg))
+        for tool_cls in DESIGN_TOOLS:
+            registry.register(tool_cls(workspace, cfg))
+    for tool_cls in DOCUMENT_TOOLS:
+        registry.register(tool_cls(workspace, cfg))
     return registry

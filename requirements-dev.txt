@@ -6,6 +6,9 @@
 #   python3 -m unittest discover -s tests
 -r requirements.txt
 -r requirements-browser.txt
+-r requirements-docs.txt
 
 # 解析 docker-compose.yml 做一致性校验，以及 YAML 相关的工具
 pyyaml>=6.0
+
+# 生成测试用的 Word / PDF 样例

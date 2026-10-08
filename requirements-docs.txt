@@ -1,0 +1,8 @@
+# 文档解析的可选依赖。
+#
+#   pip install -r requirements-docs.txt
+#
+# 只有需要读 Word / PDF 时才装。Markdown、纯文本、HTML 不需要任何依赖——
+# 缺依赖时 read_document 会给出安装命令，而不是抛一个看不懂的 ImportError。
+python-docx>=1.0
+pypdf>=4.0

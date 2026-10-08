@@ -99,9 +99,13 @@ WORKDIR /app
 
 # ---------------------------------------------------------------- Python 依赖
 # 先只拷依赖清单，让这一层能被缓存住 —— 改代码不用重装依赖。
-COPY requirements.txt requirements-browser.txt ./
+COPY requirements.txt requirements-browser.txt requirements-docs.txt ./
 
 RUN pip install --no-cache-dir -r requirements.txt
+
+# 文档解析依赖很小（几百 KB），不值得做成可选开关 —— 读需求文档是核心场景，
+# 缺了它 agent 连 Word/PDF 都打不开。
+RUN pip install --no-cache-dir -r requirements-docs.txt
 
 # ---------------------------------------------------------------- 浏览器（可选）
 # 用 Playwright 官方的 --with-deps，让它自己装 Chromium 需要的系统库

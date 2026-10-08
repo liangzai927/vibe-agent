@@ -27,11 +27,10 @@ from pathlib import Path
 from typing import Any
 
 from .. import browser as browser_mod
-from ..config import Config
 from ..imaging import ImagingUnavailable, image_data_url, pillow_available, pixel_diff
 from ..util import truncate
-from ..workspace import Workspace, WorkspaceError
 from .base import Tool, ToolError
+from .context import VISION_HINT, WorkspaceTool
 
 DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 800
@@ -50,24 +49,8 @@ def _browser_hint(exc: Exception) -> str:
     return f"\n{hint}" if hint else ""
 
 
-class _RenderTool(Tool):
+class _RenderTool(WorkspaceTool):
     """渲染类工具的公共部分。"""
-
-    def __init__(self, workspace: Workspace, cfg: Config | None = None) -> None:
-        self.workspace = workspace
-        self._cfg = cfg
-
-    def config(self) -> Config:
-        if self._cfg is None:
-            self._cfg = Config.load(self.workspace.root)
-        return self._cfg
-
-    def resolve(self, path: str, *, what: str = "文件") -> Path:
-        """解析工作区内路径，把 WorkspaceError 转成带上下文的 ToolError。"""
-        try:
-            return self.workspace.resolve(path, must_exist=True)
-        except WorkspaceError as exc:
-            raise ToolError(f"找不到{what} {path!r}：{exc}") from exc
 
     def _to_url(self, target: str) -> str:
         text = (target or "").strip()
@@ -76,10 +59,10 @@ class _RenderTool(Tool):
         if text.startswith(("http://", "https://", "file://", "data:")):
             return text
         try:
-            path = self.workspace.resolve(text, must_exist=True)
-        except WorkspaceError as exc:
+            path = self.resolve(text, what="要渲染的文件")
+        except ToolError as exc:
             raise ToolError(
-                f"找不到要渲染的文件：{text}\n（{exc}）\n"
+                f"{exc}\n"
                 f"如果是本地开发服务器，请直接给 http://localhost:<端口> 这样的 URL。"
             ) from exc
         return path.as_uri()
@@ -426,16 +409,7 @@ class CompareWithDesign(_RenderTool):
         output: str | None = None,
         **_: Any,
     ) -> str:
-        cfg = self.config()
-        if not cfg.has_vision:
-            raise ToolError(
-                "没有配置视觉模型，无法做设计稿比对。\n"
-                "主模型通常不支持读图（deepseek-chat 就不支持），需要单独配一个多模态模型：\n"
-                "  VA_VISION_MODEL=gpt-4o\n"
-                "  VA_VISION_BASE_URL=https://api.openai.com/v1\n"
-                "  VA_VISION_API_KEY=sk-...\n"
-                "不想配模型的话，用 pixel_diff 做客观的像素对比（不需要模型）。"
-            )
+        cfg = self.require_vision()
 
         design_path = self.resolve(design, what="设计稿")
         rendered_path = self.resolve(rendered, what="渲染截图")
