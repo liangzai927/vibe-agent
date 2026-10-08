@@ -73,6 +73,7 @@ class SilentUI(UI):
         super().__init__(workspace, auto_approve=approve, show_thinking=False)
         self.confirms: list[tuple[str, dict, str | None]] = []
         self.results: list[str] = []
+        self.answers: list[str] = []
 
     def tool_result(self, text, ok):
         self.last_result = text
@@ -108,6 +109,15 @@ class SilentUI(UI):
 
     def show_plan(self, plan):
         pass
+
+    def block(self, title, rows):
+        pass
+
+    def horizontal_rule(self, label=""):
+        pass
+
+    def answer(self, text):
+        self.answers.append(text)
 
 
 class QuietUI(SilentUI):

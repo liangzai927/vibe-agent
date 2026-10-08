@@ -125,6 +125,33 @@ class UI:
             else:
                 print("  " + line)
 
+    def block(self, title: str, rows: list[tuple[str, str]]) -> None:
+        """打印一个带标题的信息块。
+
+        给上层流程（比如 feature 流水线）用的。所有输出都走 UI 层是刻意的——
+        哪一层自己 print，将来换界面时就会漏掉哪一层。
+        """
+        self.newline()
+        print(bold(f"  {title}"))
+        print(dim("  " + "─" * 58))
+        width = max((len(key) for key, _ in rows), default=0)
+        for key, value in rows:
+            print(f"  {key:<{width}}  {value}")
+        print()
+
+    def horizontal_rule(self, label: str = "") -> None:
+        self.newline()
+        if label:
+            print(bold(f"  ── {label} ──"))
+        else:
+            print(dim("  " + "─" * 58))
+        print()
+
+    def answer(self, text: str) -> None:
+        """agent 的最终回答，原样打印，不加任何修饰。"""
+        self.newline()
+        print(text)
+
     # ------------------------------------------------------------------ 审批
 
     def confirm(

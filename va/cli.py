@@ -9,6 +9,8 @@ from pathlib import Path
 from . import __version__
 from .config import Config
 from .diffview import colorize, make_diff
+from .feature import FeatureRequest, describe_flags
+from .feature import run as run_feature
 from .llm import LLM
 from .loop import Agent
 from .plan import Plan
@@ -23,6 +25,7 @@ HELP = """可用命令：
   /help            显示这份帮助
   /tools           列出当前注册的工具
   /diff            查看本次会话至今所有文件改动（对比会话开始前）
+  /feature <需求>  跑一遍功能开发流水线（建分支→规划→编码→自测→自审→提交）
   /plan            查看当前任务计划
   /undo [N]        撤销最近 N 步的文件改动（默认 1 步）
   /checkpoints     列出可撤销的步骤
@@ -35,8 +38,9 @@ HELP = """可用命令：
 
 其他任何输入都会作为任务交给 agent。
 
-环境自检（问「这台机器还缺什么」）：
-  python3 run.py doctor [--offline] [--quick] [--json]
+子命令：
+  python3 run.py doctor [--offline] [--quick] [--json]     环境自检
+  python3 run.py feature "需求描述" [--doc X --design Y]    功能开发流水线
 """
 
 
@@ -71,13 +75,13 @@ _VALUE_OPTIONS = frozenset(
 )
 
 
-def split_doctor_args(raw: list[str]) -> tuple[list[str], list[str]] | None:
-    """在参数里找 `doctor` 子命令。
+def split_subcommand(raw: list[str], name: str) -> tuple[list[str], list[str]] | None:
+    """在参数里找 `name` 子命令。
 
-    返回 (doctor 之前需要转交的全局参数, doctor 之后的参数)；没有 doctor 则返回 None。
+    返回 (子命令之前需要转交的全局参数, 子命令之后的参数)；没有则返回 None。
 
     这里不能只看 ``raw[0]``：容器里 entrypoint 会补上 ``-C /workspace``，
-    于是 doctor 跑到了第二个位置。
+    于是子命令跑到了第二个位置。
     """
     index = 0
     passthrough: list[str] = []
@@ -96,22 +100,29 @@ def split_doctor_args(raw: list[str]) -> tuple[list[str], list[str]] | None:
             index += 1
             continue
 
-        # 第一个位置参数：是 doctor 就走 doctor，否则是普通任务
-        if token == "doctor":
+        # 第一个位置参数：是目标子命令就走它，否则当成普通任务
+        if token == name:
             return passthrough, raw[index + 1 :]
         return None
 
     return None
 
 
+def split_doctor_args(raw: list[str]) -> tuple[list[str], list[str]] | None:
+    """保留旧名字，内部走通用实现。"""
+    return split_subcommand(raw, "doctor")
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
 
-    # doctor 是子命令，不是交给 agent 的任务 —— 提前拦截
-    doctor_split = split_doctor_args(raw)
-    if doctor_split is not None:
-        head, tail = doctor_split
-        return _doctor(head + tail)
+    # 子命令不是交给 agent 的任务 —— 提前拦截
+    for name in ("doctor", "feature"):
+        split = split_subcommand(raw, name)
+        if split is None:
+            continue
+        head, tail = split
+        return _doctor(head + tail) if name == "doctor" else _feature(head + tail)
 
     args = build_parser().parse_args(raw)
     cfg = Config.load(args.workspace)
@@ -355,6 +366,15 @@ def _handle_command(raw: str, agent: Agent, ui: UI) -> bool:
         _show_session_diff(agent, ui)
         return False
 
+    if command == "/feature":
+        if not rest.strip():
+            ui.warn("用法：/feature <需求描述>")
+            ui.info("更完整的用法用命令行：va feature --help")
+            return False
+        req = FeatureRequest(requirement=rest.strip())
+        run_feature(agent, req, ui)
+        return False
+
     if command == "/undo":
         count = 1
         if rest.strip().isdigit():
@@ -458,6 +478,95 @@ def _doctor(argv: list[str]) -> int:
         quick=args.quick,
         as_json=args.as_json,
     )
+
+
+# --------------------------------------------------------------------- feature
+
+
+def _feature(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="va feature",
+        description="一条命令跑完：建分支 → 规划 → 编码 → 自测 → 自审 → 提交",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="其他参数：\n" + describe_flags(),
+    )
+    parser.add_argument("requirement", nargs="*", help="需求描述")
+    parser.add_argument("-C", "--workspace", help="工作区目录（默认：当前目录）")
+    parser.add_argument("-m", "--model", help="覆盖模型名")
+    parser.add_argument("--base-url", help="覆盖 API base url")
+    parser.add_argument("--branch", help="指定分支名")
+    parser.add_argument("--base", help="从哪个提交/分支切出")
+    parser.add_argument("--no-branch", action="store_true", help="不建分支，就地改")
+    parser.add_argument("--doc", help="需求文档路径")
+    parser.add_argument("--design", help="设计稿图片路径")
+    parser.add_argument("--tests", help="自测要跑的命令")
+    parser.add_argument("--no-review", action="store_true", help="跳过独立审查")
+    parser.add_argument("--push", action="store_true", help="结束后推送（默认不推）")
+    parser.add_argument("-y", "--yes", action="store_true", help="自动批准所有操作")
+    parser.add_argument("-q", "--quiet", action="store_true", help="不显示思考过程")
+    parser.add_argument("--max-steps", type=int, help="最大步数")
+    parser.add_argument("--no-session", action="store_true", help="不保存会话")
+    args = parser.parse_args(argv)
+
+    requirement = " ".join(args.requirement).strip()
+    if not requirement and not args.doc and not args.design:
+        parser.error("需要给需求描述，或者用 --doc / --design 指定输入")
+
+    cfg = Config.load(args.workspace)
+    if args.model:
+        cfg.model = args.model
+    if args.base_url:
+        cfg.base_url = args.base_url
+    if args.yes:
+        cfg.auto_approve = True
+    if args.quiet:
+        cfg.show_thinking = False
+    if args.max_steps:
+        cfg.max_iterations = args.max_steps
+
+    cfg.require_key()
+
+    try:
+        workspace = Workspace(cfg.workspace)
+    except WorkspaceError as exc:
+        print(red(f"工作区错误：{exc}"), file=sys.stderr)
+        return 2
+
+    ui = UI(workspace, auto_approve=cfg.auto_approve, show_thinking=cfg.show_thinking)
+
+    # feature 跑得久，默认存会话，中途断了能接上
+    session_args = argparse.Namespace(
+        no_session=args.no_session, resume=None, continue_=False
+    )
+    session, history, resume_note, saved_plan = _open_session(
+        session_args, workspace, cfg, ui
+    )
+
+    registry = build_registry(workspace, cfg=cfg)
+    agent = Agent(
+        cfg,
+        ui,
+        workspace=workspace,
+        registry=registry,
+        llm=LLM(cfg),
+        session=session,
+        history=history,
+        extra_instructions=resume_note,
+        plan=Plan.from_dict(saved_plan) if saved_plan else None,
+    )
+
+    request = FeatureRequest(
+        requirement=requirement or "（需求见文档 / 设计稿）",
+        branch=args.branch or "",
+        base=args.base or "",
+        doc=args.doc or "",
+        design=args.design or "",
+        push=args.push,
+        review=not args.no_review,
+        tests=args.tests or "",
+        no_branch=args.no_branch,
+    )
+    return run_feature(agent, request, ui)
 
 
 if __name__ == "__main__":
