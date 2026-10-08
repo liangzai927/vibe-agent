@@ -52,31 +52,69 @@ class TestScriptSanity(unittest.TestCase):
 
 @unittest.skipUnless(HAS_BASH, "需要 bash")
 class TestPackaging(unittest.TestCase):
-    """用 --working-tree 跑，这样才会真正走到排除规则那一段。"""
+    """通过一份**仓库副本**来测，绝不碰真实目录。
+
+    血的教训：这个测试最初直接对真实仓库操作——setUp 用金丝雀内容覆盖真的
+    `.env`，tearDown 再把它删掉。跑一次测试就把开发者的 API key 弄没了。
+    所以现在：
+
+    * 先把仓库拷到临时目录，只对副本操作；
+    * 另外记下真实 `.env` 的指纹，tearDown 里核对——一旦被改动就立刻报错。
+    """
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.out = Path(self._tmp.name) / "pkg.tar.gz"
-        # 造几个必须被排除的东西：里面各放一个独特字符串便于断言
-        (ROOT / ".env").write_text("VA_API_KEY=sk-LEAK-CANARY\n", encoding="utf-8")
-        (ROOT / ".va" / "sessions").mkdir(parents=True, exist_ok=True)
-        (ROOT / ".va" / "sessions" / "canary.jsonl").write_text(
+        base = Path(self._tmp.name)
+        self.repo = base / "vibe-agent"
+        shutil.copytree(
+            ROOT,
+            self.repo,
+            ignore=shutil.ignore_patterns(
+                ".venv", "venv", ".git", "__pycache__", "dist", ".va", "*.pyc"
+            ),
+        )
+        self.out = base / "pkg.tar.gz"
+
+        # 真实 .env 的指纹。测试全程不许它发生变化。
+        real_env = ROOT / ".env"
+        self._real_env_state = (
+            real_env.exists(),
+            real_env.stat().st_mtime_ns if real_env.exists() else None,
+            real_env.read_bytes() if real_env.exists() else None,
+        )
+
+        # 金丝雀只放进副本，绝不碰真实仓库
+        (self.repo / ".env").write_text("VA_API_KEY=sk-LEAK-CANARY\n", encoding="utf-8")
+        (self.repo / ".va" / "sessions").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".va" / "sessions" / "canary.jsonl").write_text(
             "session-canary\n", encoding="utf-8"
         )
-        self._created = [ROOT / ".env", ROOT / ".va"]
 
     def tearDown(self) -> None:
-        for path in self._created:
-            if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
-            elif path.exists():
-                path.unlink()
+        real_env = ROOT / ".env"
+        now = (
+            real_env.exists(),
+            real_env.stat().st_mtime_ns if real_env.exists() else None,
+            real_env.read_bytes() if real_env.exists() else None,
+        )
         self._tmp.cleanup()
+        self.assertEqual(
+            now,
+            self._real_env_state,
+            "测试改动了真实的 .env！这个测试之前就是因为直接操作真实仓库，"
+            "把开发者的 API key 弄丢过一次。",
+        )
 
     def _build(self) -> list[str]:
         result = subprocess.run(
-            ["bash", str(PACKAGE), "--working-tree", "--out", str(self.out)],
-            cwd=ROOT,
+            [
+                "bash",
+                str(self.repo / "scripts" / "package.sh"),
+                "--working-tree",
+                "--out",
+                str(self.out),
+            ],
+            cwd=self.repo,
             capture_output=True,
             text=True,
             timeout=180,
@@ -144,6 +182,26 @@ class TestPackaging(unittest.TestCase):
         names = self._build()
         junk = [n for n in names if Path(n).name.startswith("._")]
         self.assertEqual(junk, [], f"包里混进了 macOS 资源分叉文件：{junk[:3]}")
+
+    def test_python_and_bsdtar_see_the_same_archive(self):
+        """两种读法必须一致。
+
+        bsdtar 在 -t 模式下会隐藏 AppleDouble 条目，所以 `tar -tzf` 看着干净，
+        而 Linux 上的 GNU tar 解压时会多出一堆文件。数目对不上就是这个信号。
+        """
+        self._build()
+        with tarfile.open(self.out) as archive:
+            python_count = len(archive.getnames())
+        result = subprocess.run(
+            ["tar", "-tzf", str(self.out)], capture_output=True, text=True
+        )
+        bsdtar_count = len([l for l in result.stdout.splitlines() if l.strip()])
+        self.assertEqual(
+            python_count,
+            bsdtar_count,
+            f"Python 读到 {python_count} 条、bsdtar 读到 {bsdtar_count} 条——"
+            f"归档里混了 bsdtar 会自动隐藏的条目，别的平台解压就会多出文件",
+        )
 
     def test_writes_checksum_file(self):
         self._build()

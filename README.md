@@ -574,6 +574,17 @@ venv（playwright + Pillow + pyyaml）416 tests, OK (skipped=2)
    `没有找到可启动的浏览器（试过：Google Chrome: Error、系统 chrome: Error…）`。
    Playwright 的异常类名就叫 `Error`，只报类名等于没报。改成取消息首行。
 
+6. **打包时 bsdtar 偷偷塞了 74 个垃圾文件** —— macOS 的 bsdtar 会把扩展属性
+   写成 `._` AppleDouble 条目打进包，**它自己读的时候会隐藏这些**，所以
+   `tar -tzf` 看着干干净净；只有用 Python 的 `tarfile` 去读才发现 148 条里
+   有 74 条是垃圾。Linux 上用 GNU tar 解压时它们会原样出现。
+
+7. **测试把开发者的 API key 删了** —— `test_packaging.py` 最初直接对真实仓库
+   操作：setUp 用金丝雀内容覆盖真的 `.env`，tearDown 再把它删掉。跑一次测试
+   密钥就没了，而且本机没配 Time Machine，无法恢复。
+   现在改成先拷一份仓库、只对副本操作，并在 tearDown 里核对真实 `.env` 的
+   指纹——一旦被改动就立刻失败。**测试碰真实用户数据这件事，代价高得离谱。**
+
 ---
 
 ## 已知边界
