@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ HELP = """可用命令：
   /tools           列出当前注册的工具
   /diff            查看本次会话至今所有文件改动（对比会话开始前）
   /feature <需求>  跑一遍功能开发流水线（建分支→规划→编码→自测→自审→提交）
+  /paste [名字]     把剪贴板里的图片存成文件，并给出路径
   /plan            查看当前任务计划
   /models          列出服务商支持的所有模型
   /model [名字]     查看或切换模型（会写进 .env 持久化）
@@ -39,6 +41,9 @@ HELP = """可用命令：
   /exit            退出（Ctrl+D 同效）
 
 其他任何输入都会作为任务交给 agent。
+
+想把图片交给它：先在别处复制图片，然后在消息里写 @clip —— 它会自动替换成
+图片路径。终端本身传不了图片数据，所以用这个标记来「粘贴」。
 
 子命令：
   python3 run.py setup                                      首次配置（也可以直接启动，没配会自己引导）
@@ -306,8 +311,12 @@ def _repl(agent: Agent, ui: UI) -> None:
                 break
             continue
 
+        task = _expand_clip_tokens(raw, agent, ui)
+        if task is None:
+            continue
+
         try:
-            answer = agent.run(raw)
+            answer = agent.run(task)
         except KeyboardInterrupt:
             ui.newline()
             ui.warn("已中断")
@@ -365,6 +374,10 @@ def _handle_command(raw: str, agent: Agent, ui: UI) -> bool:
 
     if command == "/checkpoints":
         _show_checkpoints(agent, ui)
+        return False
+
+    if command in ("/paste", "/clip", "/图片"):
+        _paste_clipboard(agent, ui, rest)
         return False
 
     if command == "/models":
@@ -544,6 +557,72 @@ def _setup(argv: list[str]) -> int:
     if not result.verified:
         print(dim("  配置已写入，但连通性没验证通过。改好后跑一次 doctor 确认。"))
     return 0
+
+
+# --------------------------------------------------------------------- 剪贴板
+
+
+# @clip / @paste / @剪贴板 都会被替换成图片路径。
+# 为什么要用标记而不是拦截 Ctrl+V：终端传的是按键不是图片数据，
+# 大多数终端在粘贴图片时干脆什么都不发——没有可拦截的东西。
+CLIP_TOKEN = re.compile(r"@(?:clip|paste|image|img|图片|剪贴板)(?![\w.\-])", re.IGNORECASE)
+
+
+def _grab_clipboard(agent: Agent) -> "object":
+    from .clipboard import default_filename, inbox_dir, read_image
+
+    target = inbox_dir(agent.workspace.root) / default_filename()
+    return read_image(target)
+
+
+def _relative_to_workspace(agent: Agent, path) -> str:
+    try:
+        return agent.workspace.relative(path)
+    except Exception:  # noqa: BLE001
+        return str(path)
+
+
+def _paste_clipboard(agent: Agent, ui: UI, name: str = "") -> None:
+    """把剪贴板里的图片存进工作区，并打印它的路径。"""
+    from .clipboard import default_filename, inbox_dir, read_image, support
+
+    ok, how = support()
+    if not ok:
+        ui.error(f"当前平台不支持读剪贴板图片：{how}")
+        return
+
+    filename = name.strip() or default_filename()
+    if not filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+        filename += ".png"
+
+    target = inbox_dir(agent.workspace.root) / filename
+    result = read_image(target)
+
+    if not result.ok:
+        ui.error(result.describe())
+        return
+
+    rel = _relative_to_workspace(agent, result.path)
+    dims = f"（{result.size[0]}x{result.size[1]}）" if result.size else ""
+    ui.success(f"已存为 {rel}{dims}")
+    ui.info("用法：在消息里直接写 @clip，它会自动替换成这个路径。例如：")
+    ui.info(f"  › 用 inspect_image 看一下 {rel}，然后照着它实现")
+
+
+def _expand_clip_tokens(text: str, agent: Agent, ui: UI) -> str | None:
+    """把消息里的 @clip 换成剪贴板图片路径。取不到就返回 None（放弃这条消息）。"""
+    if not CLIP_TOKEN.search(text):
+        return text
+
+    result = _grab_clipboard(agent)
+    if not result.ok:
+        ui.error(result.describe())
+        ui.info("（这条消息没有发出去。也可以用 /paste 单独存图。）")
+        return None
+
+    rel = _relative_to_workspace(agent, result.path)
+    ui.success(f"已把剪贴板图片存为 {rel}")
+    return CLIP_TOKEN.sub(rel, text)
 
 
 # --------------------------------------------------------------------- 模型切换

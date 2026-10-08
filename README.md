@@ -468,11 +468,52 @@ review_changes(requirement=...)       专门的代码审查
 
 ---
 
+## 把图片交给 agent
+
+终端传的是按键，不是图片数据——在终端里直接 Ctrl+V 一张图，什么都不会发生。
+所以用 **`@clip` 标记**：先在别处复制图片，然后在消息里写它。
+
+```
+› 照着 @clip 这个设计稿实现 index.html
+  ✓ 已把剪贴板图片存为 .va/inbox/clip-20261008-165851.png
+```
+
+`@clip` / `@paste` / `@img` / `@图片` / `@剪贴板` 都认。取不到图时**这条消息不会
+发出去**——否则模型会看到一个字面量 `@clip` 而不知所谓。
+
+也可以单独存图：
+
+```
+› /paste                  # 存成 .va/inbox/clip-<时间戳>.png
+› /paste 首页设计稿        # 指定名字
+  ✓ 已存为 .va/inbox/首页设计稿.png（460x480）
+  用法：在消息里直接写 @clip，它会自动替换成这个路径。例如：
+    › 用 inspect_image 看一下 .va/inbox/首页设计稿.png，然后照着它实现
+```
+
+各平台怎么读剪贴板：
+
+| 平台 | 方式 | 需要装什么 |
+|---|---|---|
+| macOS | 自带的 `osascript` | 什么都不用装 |
+| Windows | PowerShell 的 `System.Windows.Forms.Clipboard` | 什么都不用装 |
+| Linux | `wl-paste`（Wayland）/ `xclip`（X11） | 装一个 |
+
+> macOS 上刻意**不走 System Events**——那会触发「自动化」权限弹窗。
+> 直接问剪贴板不需要任何权限。
+
+`a@clip.com` 这样的邮箱地址不会被误替换（标记后面不能紧跟 `.` 或字母数字）。
+落盘前还会**真解码一次**：有些程序会把文本塞进剪贴板的图片类型里，
+不校验的话坏文件会流到下游，到那时报错的地方离病因已经很远。
+
+---
+
 ## 交互模式命令
 
 ```
 /help            帮助                 /tools        列出工具（含副作用标记）
 /feature <需求>  跑一遍功能开发流水线    /plan         查看当前任务计划
+/paste [名字]    把剪贴板里的图片存成文件  /models       列出服务商支持的模型
 /diff            本次会话所有文件改动   /undo [N]     撤销最近 N 次文件改动
 /checkpoints     列出可撤销的步骤       /sessions     列出历史会话
 /reset           清空对话历史          /compact      立即压缩上下文
@@ -483,6 +524,7 @@ review_changes(requirement=...)       专门的代码审查
 子命令：
 
 ```bash
+python3 run.py setup                                     # 首次配置模型服务
 python3 run.py doctor [--offline] [--quick] [--json]    # 环境自检
 python3 run.py feature "需求描述" [--doc X] [--design Y]  # 功能开发流水线
 ```

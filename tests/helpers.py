@@ -74,6 +74,9 @@ class SilentUI(UI):
         self.confirms: list[tuple[str, dict, str | None]] = []
         self.results: list[str] = []
         self.answers: list[str] = []
+        # 提示类输出也记下来。不覆盖的话它们会直接打到 stdout——
+        # 测试既断言不到，输出里还混进一堆本该被静音的行。
+        self.messages: list[tuple[str, str]] = []
 
     def tool_result(self, text, ok):
         self.last_result = text
@@ -118,6 +121,21 @@ class SilentUI(UI):
 
     def answer(self, text):
         self.answers.append(text)
+
+    def info(self, text):
+        self.messages.append(("info", text))
+
+    def warn(self, text):
+        self.messages.append(("warn", text))
+
+    def error(self, text):
+        self.messages.append(("error", text))
+
+    def success(self, text):
+        self.messages.append(("success", text))
+
+    def text(self, line=""):
+        self.messages.append(("text", line))
 
 
 class QuietUI(SilentUI):
