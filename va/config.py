@@ -55,6 +55,9 @@ class Config:
     show_thinking: bool = True
     # 估算 token 超过这个数就自动压缩历史（按字符数/3 粗估）
     context_budget: int = 60_000
+    # 子 agent 最多嵌套几层。默认 1 = 主 agent 能委派，子 agent 不能再往下派。
+    # 刻意不鼓励调大：失控的成本和难以追踪的调用链，换不来多少实际收益。
+    max_delegate_depth: int = 1
     # ---- 视觉模型（用于「截图 vs 设计图」比对，可选）----
     # 主模型多数不支持图片（如 deepseek-chat），所以单独配一个多模态模型。
     vision_model: str = ""
@@ -117,6 +120,7 @@ class Config:
             auto_approve=(os.environ.get("VA_AUTO_APPROVE", "").strip().lower() in _TRUTHY),
             show_thinking=(os.environ.get("VA_SHOW_THINKING", "1").strip().lower() in _TRUTHY),
             context_budget=int(os.environ.get("VA_CONTEXT_BUDGET", "60000") or 60000),
+            max_delegate_depth=max(0, int(os.environ.get("VA_MAX_DELEGATE_DEPTH", "1") or 1)),
             vision_model=(os.environ.get("VA_VISION_MODEL") or "").strip(),
             vision_base_url=(os.environ.get("VA_VISION_BASE_URL") or "").strip(),
             vision_api_key=(os.environ.get("VA_VISION_API_KEY") or "").strip(),

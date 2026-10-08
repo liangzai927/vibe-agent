@@ -54,6 +54,7 @@ services:
       - VA_TEMPERATURE
       - VA_MAX_ITERATIONS
       - VA_MAX_TOKENS
+      - VA_MAX_DELEGATE_DEPTH
       - VA_CONTEXT_BUDGET
       - VA_AUTO_APPROVE
       - VA_SHOW_THINKING

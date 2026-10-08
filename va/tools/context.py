@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,31 @@ VISION_HINT = (
     "不想配模型的话：渲染与像素对比（render_page / pixel_diff）完全不需要模型，"
     "照样能驱动 UI 迭代，只是少了「该改什么」的自然语言提示。"
 )
+
+
+@dataclass
+class AgentContext:
+    """工具层需要共享的运行时状态。
+
+    有些工具不能只靠 workspace 干活——比如委派子 agent 时要拿到父 agent 的
+    撤销栈，否则子 agent 改的文件 `/undo` 撤不掉。把它们显式打包传下去，
+    比让工具各自去反查全局状态可靠得多。
+
+    ui / undo / plan_board 用 Any 标注是刻意的：它们来自上层，写死类型会让
+    工具层反向依赖 ui、history、plan，得不偿失。
+    """
+
+    workspace: Workspace
+    cfg: Config | None = None
+    plan_board: Any = None  # PlanBoard
+    undo: Any = None  # UndoStack
+    ui: Any = None  # UI
+    llm: Any = None  # LLM —— 子 agent 要复用它，别每次新建连接
+    depth: int = 0  # 0 表示这是主 agent
+    max_depth: int = 1
+
+    def can_delegate(self) -> bool:
+        return self.depth < self.max_depth
 
 
 class WorkspaceTool(Tool):

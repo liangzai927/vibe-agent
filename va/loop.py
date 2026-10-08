@@ -24,6 +24,8 @@ from .plan import Plan, PlanBoard
 from .prompts import build_system_prompt
 from .session import SessionStore
 from .tools import Registry, build_registry, safe_run
+from .tools.context import AgentContext
+from .tools.delegate import Delegate
 from .tools.plan import UpdatePlan
 from .ui import UI
 from .util import preview, red
@@ -45,6 +47,7 @@ class Agent:
         extra_instructions: str = "",
         plan_board: PlanBoard | None = None,
         plan: Plan | None = None,
+        agent_depth: int = 0,
     ) -> None:
         self.cfg = cfg
         self.ui = ui
@@ -54,20 +57,39 @@ class Agent:
         if plan is not None:
             self.plan_board.plan = plan
 
-        if registry is None:
-            self.registry = build_registry(
-                self.workspace, cfg=cfg, plan_board=self.plan_board
-            )
-        else:
-            self.registry = registry
-            # 无条件重绑：build_registry 在没收到 plan_board 时会自己造一个，
-            # 那样工具更新的看板和 agent 持有的就不是同一个，计划会写进看不见的地方。
-            self.registry.register(UpdatePlan(self.plan_board))
         self.llm = llm or LLM(cfg)
         self.session = session
-        self.undo = undo or UndoStack(self.workspace.root)
         self.extra_instructions = extra_instructions
         self.compactions = 0
+
+        # 注意用 `is None` 而不是 `undo or ...`：
+        # UndoStack 定义了 __len__，**空的撤销栈是 falsy 的**，
+        # 用 or 会把它丢掉换成新对象——父 agent 传下来的空栈会被无声替换，
+        # 子 agent 的改动于是撤不掉。
+        self.undo = undo if undo is not None else UndoStack(self.workspace.root)
+
+        self.agent_ctx = AgentContext(
+            workspace=self.workspace,
+            cfg=cfg,
+            plan_board=self.plan_board,
+            undo=self.undo,
+            ui=ui,
+            llm=self.llm,
+            depth=agent_depth,
+            max_depth=cfg.max_delegate_depth,
+        )
+
+        if registry is None:
+            self.registry = build_registry(self.workspace, cfg=cfg, ctx=self.agent_ctx)
+        else:
+            self.registry = registry
+            # 无条件重绑：build_registry 在没收到 ctx 时会自己造看板、
+            # 也不会注册委派工具。重绑保证工具看到的状态和 agent 持有的完全一致。
+            self.registry.register(UpdatePlan(self.plan_board))
+            if self.agent_ctx.can_delegate():
+                self.registry.register(Delegate(self.agent_ctx))
+            else:
+                self.registry.unregister("delegate")
 
         self.messages: list[dict[str, Any]] = [self._system_message()]
         if history:
