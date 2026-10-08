@@ -23,11 +23,13 @@ class UI:
 
     # ------------------------------------------------------------------ 基础
 
-    def banner(self, model: str, base_url: str) -> None:
+    def banner(self, model: str, base_url: str, session_id: str | None = None) -> None:
         print()
         print(bold("  vibe-agent") + dim(f"  v0.1  ·  {model}"))
         print(dim(f"  工作区  {self.workspace.root}"))
         print(dim(f"  接口    {base_url}"))
+        if session_id:
+            print(dim(f"  会话    {session_id}"))
         print(dim("  输入任务开始；/help 查看命令；/exit 退出"))
         print()
 
@@ -104,21 +106,33 @@ class UI:
 
     # ------------------------------------------------------------------ 审批
 
-    def confirm(self, tool_name: str, args: dict[str, Any], detail: str) -> bool:
+    def confirm(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        detail: str,
+        preview: str | None = None,
+    ) -> bool:
         self.newline()
         if self.auto_approve or tool_name in self._always_allow:
             print(yellow(f"  ⚡ 自动批准 {tool_name}") + dim(f"  {detail}"))
+            if preview:
+                # 自动批准模式下只显示摘要行，避免刷屏
+                print(dim("  │  " + preview.splitlines()[0]))
             return True
         if not sys.stdin.isatty():
             print(red(f"  ✗ 非交互环境，默认拒绝 {tool_name}"))
             return False
 
         print(yellow(f"  ⚠ 需要确认：{tool_name}"))
-        for key, value in args.items():
-            text = value if isinstance(value, str) else str(value)
-            if len(text) > 300:
-                text = text[:300] + "…"
-            print(dim(f"      {key} = {text}"))
+        if preview:
+            self.show_diff(preview)
+        else:
+            for key, value in args.items():
+                text = value if isinstance(value, str) else str(value)
+                if len(text) > 300:
+                    text = text[:300] + "…"
+                print(dim(f"      {key} = {text}"))
         try:
             answer = input(yellow("  执行吗？[y]是 / [a]本次会话总是 / [n]否 > ")).strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -128,6 +142,11 @@ class UI:
             self._always_allow.add(tool_name)
             return True
         return answer in ("y", "yes", "")
+
+    def show_diff(self, diff_text: str) -> None:
+        """带左侧竖线打印一段（可能已着色的）diff。"""
+        for line in diff_text.splitlines():
+            print("  │ " + line)
 
     # ------------------------------------------------------------------ 其他
 

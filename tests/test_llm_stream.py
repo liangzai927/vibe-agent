@@ -14,13 +14,14 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from helpers import SilentUI  # noqa: E402
 from va.config import Config  # noqa: E402
 from va.llm import LLM  # noqa: E402
 from va.loop import Agent  # noqa: E402
 from va.tools import build_registry  # noqa: E402
-from va.ui import UI  # noqa: E402
 from va.workspace import Workspace  # noqa: E402
 
 
@@ -162,44 +163,6 @@ class TestStreaming(StreamTestCase):
         self.assertEqual(len(sent["tools"]), 1)
 
 
-class SilentUI(UI):
-    """完全静音的 UI，只记录工具结果。"""
-
-    def __init__(self, workspace):
-        super().__init__(workspace, auto_approve=True, show_thinking=False)
-        self.results: list[str] = []
-
-    def tool_result(self, text, ok):
-        self.results.append(text)
-
-    def tool_call(self, *a, **k):
-        pass
-
-    def assistant_header(self, *a, **k):
-        pass
-
-    def stream_text(self, *a, **k):
-        pass
-
-    def stream_thinking(self, *a, **k):
-        pass
-
-    def newline(self, *a, **k):
-        pass
-
-    def info(self, *a, **k):
-        pass
-
-    def success(self, *a, **k):
-        pass
-
-    def warn(self, *a, **k):
-        pass
-
-    def error(self, *a, **k):
-        pass
-
-
 class TestToolCallStreaming(StreamTestCase):
     script = [
         tool_call_chunks(
@@ -215,10 +178,10 @@ class TestToolCallStreaming(StreamTestCase):
     ]
 
     def test_fragmented_arguments_are_reassembled(self):
-        turn = self.llm.complete([{"role": "user", "content": "读文件"}])
-        self.assertEqual(len(turn.tool_calls), 1)
+        turn_obj = self.llm.complete([{"role": "user", "content": "读文件"}])
+        self.assertEqual(len(turn_obj.tool_calls), 1)
 
-        call = turn.tool_calls[0]
+        call = turn_obj.tool_calls[0]
         self.assertEqual(call.id, "call_abc")
         self.assertEqual(call.name, "read_file")
         self.assertEqual(call.parsed_arguments(), {"path": "a.txt"})

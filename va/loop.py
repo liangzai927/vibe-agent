@@ -4,7 +4,11 @@
     追加用户消息 → 调用模型 → 若有 tool_calls 就执行 → 结果回灌 → 再调用……
     直到模型不再调用工具，或触达步数上限。
 
-其中还负责：工具审批、参数解析容错、上下文超限时的自动压缩。
+这一层还负责四件横切的事：
+* **审批**  —— 改动前把 diff 摆给用户看，而不是展示工具原始参数；
+* **撤销**  —— 每一步开始前抓文件快照，``/undo`` 能整步回退；
+* **持久化** —— 每条消息追加写进会话文件，退出后可恢复；
+* **压缩**  —— 上下文超限时summary旧历史，且保证不破坏消息配对。
 """
 
 from __future__ import annotations
@@ -13,12 +17,14 @@ import json
 from typing import Any
 
 from .config import Config
+from .history import Checkpoint, UndoStack
 from .llm import LLM, LLMError
 from .messages import AssistantTurn, ToolCall, system_message, tool_message, user_message
 from .prompts import build_system_prompt
+from .session import SessionStore
 from .tools import Registry, build_registry, safe_run
 from .ui import UI
-from .util import preview
+from .util import preview, red
 from .workspace import Workspace
 
 
@@ -31,14 +37,24 @@ class Agent:
         workspace: Workspace | None = None,
         registry: Registry | None = None,
         llm: LLM | None = None,
+        session: SessionStore | None = None,
+        undo: UndoStack | None = None,
+        history: list[dict[str, Any]] | None = None,
+        extra_instructions: str = "",
     ) -> None:
         self.cfg = cfg
         self.ui = ui
         self.workspace = workspace or Workspace(cfg.workspace)
         self.registry = registry or build_registry(self.workspace)
         self.llm = llm or LLM(cfg)
-        self.messages: list[dict[str, Any]] = [self._system_message()]
+        self.session = session
+        self.undo = undo or UndoStack(self.workspace.root)
+        self.extra_instructions = extra_instructions
         self.compactions = 0
+
+        self.messages: list[dict[str, Any]] = [self._system_message()]
+        if history:
+            self.messages.extend(history)
 
     # ------------------------------------------------------------------ 公开
 
@@ -46,17 +62,28 @@ class Agent:
     def system_prompt(self) -> str:
         return self.messages[0]["content"]  # type: ignore[return-value]
 
+    @property
+    def session_id(self) -> str | None:
+        return self.session.meta.id if self.session else None
+
     def reset(self) -> None:
         self.messages = [self._system_message()]
         self.compactions = 0
+        self.undo = UndoStack(self.workspace.root)
 
     def run(self, task: str) -> str:
         """执行一个任务，返回模型的最终文本回答。"""
         self._maybe_compact(force=False)
-        self.messages.append(user_message(task))
+        self._append(user_message(task))
+        if self.session is not None and not self.session.meta.title:
+            self.session.set_title(preview(task, 60))
 
         final_text = ""
+        reason = "max_steps"
+        steps_used = 0
+
         for step in range(1, self.cfg.max_iterations + 1):
+            steps_used = step
             self.ui.assistant_header(step)
             try:
                 turn = self.llm.complete(
@@ -67,73 +94,160 @@ class Agent:
                 )
             except LLMError as exc:
                 self.ui.error(str(exc))
+                self._finish_session("llm_error", steps_used)
                 return f"[模型调用失败] {exc}"
             except KeyboardInterrupt:
                 self.ui.newline()
                 self.ui.warn("已中断本次生成")
+                self._finish_session("interrupted", steps_used)
                 return "[用户中断]"
 
             self.ui.newline()
-            self.messages.append(turn.to_message())
+            self._append(turn.to_message())
 
             if not turn.has_tool_calls:
                 final_text = turn.content
+                reason = "finished"
                 break
 
-            self._execute_tool_calls(turn.tool_calls)
+            self._execute_tool_calls(turn.tool_calls, step)
             self._maybe_compact(force=False)
         else:
             self.ui.warn(f"已达步数上限 {self.cfg.max_iterations}，强制停止。")
             final_text = final_text or "[已达步数上限]"
 
+        self._finish_session(reason, steps_used)
         return final_text
+
+    # ---------------------------------------------------------------- 撤销
+
+    def undo_last(self, count: int = 1) -> str:
+        """回退最近 count 次文件改动，并把这个事实写回对话历史。"""
+        taken, blocked = self.undo.undo(count)
+
+        lines: list[str] = []
+        restored: list[str] = []
+        for checkpoint in taken:
+            files = [
+                f"{snap.code} {self.undo.rel(path)}"
+                for path, snap in checkpoint.snapshots.items()
+            ]
+            restored.extend(files)
+            if files:
+                lines.append(
+                    f"已还原第 {checkpoint.index} 步（{checkpoint.label}）：{'、'.join(files)}"
+                )
+
+        if not taken and not blocked:
+            return "没有可撤销的步骤。"
+        if not taken:
+            lines.append("没有可撤销的文件改动。")
+        for reason in blocked:
+            lines.append(f"{red('未还原')}：{reason}")
+
+        if taken:
+            # 追加说明而不是删除历史——会话文件是追加写的，而且模型需要知道磁盘已回退
+            note = (
+                "[用户操作] 用户撤销了最近 %d 次文件改动。已还原：%s。\n"
+                "当前磁盘内容已经回退，请重新 read_file 确认现状后再继续，"
+                "不要依赖上方对话里关于这些文件的旧结论。"
+                % (len(taken), "、".join(restored) if restored else "（无）")
+            )
+            self._append(user_message(note))
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ 内部
 
     def _system_message(self) -> dict[str, Any]:
-        prompt = build_system_prompt(self.workspace, self.registry.catalog())
+        prompt = build_system_prompt(
+            self.workspace, self.registry.catalog(), self.extra_instructions
+        )
         return system_message(prompt)
 
-    def _execute_tool_calls(self, calls: list[ToolCall]) -> None:
-        total = len(calls)
-        for index, call in enumerate(calls, 1):
-            tool = self.registry.get(call.name)
-
-            if tool is None:
-                message = (
-                    f"错误：不存在名为 {call.name!r} 的工具。"
-                    f"可用工具：{', '.join(self.registry.names())}"
-                )
-                self.ui.tool_call(index, total, call.name, "未知工具")
-                self.ui.tool_result(message, ok=False)
-                self.messages.append(tool_message(call.id, message))
-                continue
-
+    def _append(self, message: dict[str, Any]) -> None:
+        """所有消息的唯一入口：同时进内存和会话文件。"""
+        self.messages.append(message)
+        if self.session is not None:
             try:
-                args = call.parsed_arguments()
-            except ValueError as exc:
-                message = f"错误：{exc}"
-                self.ui.tool_call(index, total, call.name, "参数解析失败")
-                self.ui.tool_result(message, ok=False)
-                self.messages.append(tool_message(call.id, message))
-                continue
+                self.session.append_message(message)
+            except OSError as exc:
+                self.ui.warn(f"会话写入失败（不影响继续工作）：{exc}")
 
-            summary = tool.summarize(args)
-            self.ui.tool_call(index, total, call.name, summary)
+    def _finish_session(self, reason: str, steps: int) -> None:
+        if self.session is None:
+            return
+        try:
+            self.session.append_end(reason, steps)
+        except OSError:
+            pass
 
-            if tool.requires_approval and not self._approved(call, args):
-                message = "用户拒绝执行该操作。请换一种方式，或询问用户希望怎么做。"
-                self.ui.tool_result("用户拒绝", ok=False)
-                self.messages.append(tool_message(call.id, message))
-                continue
+    def _execute_tool_calls(self, calls: list[ToolCall], step: int) -> None:
+        total = len(calls)
+        names = "、".join(dict.fromkeys(call.name for call in calls))
+        checkpoint = self.undo.begin(names or f"{total} 个工具调用")
+        mutating_ran = False
 
-            result, ok = safe_run(tool, args)
-            self.ui.tool_result(result, ok=ok)
-            self.messages.append(tool_message(call.id, result))
+        try:
+            for index, call in enumerate(calls, 1):
+                tool = self.registry.get(call.name)
 
-    def _approved(self, call: ToolCall, args: dict[str, Any]) -> bool:
-        detail = preview(_describe(args), 120)
-        return self.ui.confirm(call.name, args, detail)
+                if tool is None:
+                    message = (
+                        f"错误：不存在名为 {call.name!r} 的工具。"
+                        f"可用工具：{', '.join(self.registry.names())}"
+                    )
+                    self.ui.tool_call(index, total, call.name, "未知工具")
+                    self.ui.tool_result(message, ok=False)
+                    self._append(tool_message(call.id, message))
+                    continue
+
+                try:
+                    args = call.parsed_arguments()
+                except ValueError as exc:
+                    message = f"错误：{exc}"
+                    self.ui.tool_call(index, total, call.name, "参数解析失败")
+                    self.ui.tool_result(message, ok=False)
+                    self._append(tool_message(call.id, message))
+                    continue
+
+                summary = tool.summarize(args)
+                self.ui.tool_call(index, total, call.name, summary)
+
+                # 动盘之前先抓快照
+                targets = tool.affected_paths(args)
+                for path in targets:
+                    self.undo.capture(checkpoint, path)
+                if tool.opaque:
+                    self.undo.mark_opaque(checkpoint, f"{call.name} 的副作用无法追踪")
+
+                if tool.requires_approval and not self._approved(call, args, tool):
+                    message = "用户拒绝执行该操作。请换一种方式，或询问用户希望怎么做。"
+                    self.ui.tool_result("用户拒绝", ok=False)
+                    self._append(tool_message(call.id, message))
+                    continue
+
+                result, ok = safe_run(tool, args)
+                self.ui.tool_result(result, ok=ok)
+                self._append(tool_message(call.id, result))
+
+                if ok and (targets or tool.opaque):
+                    mutating_ran = True
+        finally:
+            if mutating_ran:
+                self.undo.commit(checkpoint)
+
+    def _approved(self, call: ToolCall, args: dict[str, Any], tool: Any) -> bool:
+        preview_text = self._safe_preview(tool, args)
+        detail = preview(preview_text.splitlines()[0], 100) if preview_text else preview(_describe(args), 120)
+        return self.ui.confirm(call.name, args, detail, preview_text)
+
+    @staticmethod
+    def _safe_preview(tool: Any, args: dict[str, Any]) -> str | None:
+        """预览失败绝不能阻断审批流程。"""
+        try:
+            return tool.preview(args)
+        except Exception:  # noqa: BLE001
+            return None
 
     # ------------------------------------------------------------- 上下文压缩
 
@@ -160,6 +274,12 @@ class Agent:
         self.messages = [self.messages[0], user_message(note), *self.messages[keep_from:]]
         self.compactions += 1
         self.ui.info(f"上下文已压缩（第 {self.compactions} 次），丢弃 {len(dropped)} 条历史消息")
+
+        if self.session is not None:
+            try:
+                self.session.append_compact(self.messages)
+            except OSError as exc:
+                self.ui.warn(f"压缩结果写入会话失败：{exc}")
 
     def _safe_cut_index(self, keep_recent: int) -> int:
         """找一个不会拆散 assistant(tool_calls)/tool 配对的切点。
@@ -188,8 +308,7 @@ class Agent:
         )
         try:
             turn: AssistantTurn = self.llm.complete([user_message(prompt)])
-            text = turn.content.strip()
-            return text or "（摘要生成失败，历史已丢弃）"
+            return turn.content.strip() or "（摘要生成失败，历史已丢弃）"
         except (LLMError, KeyboardInterrupt):
             return "（摘要生成失败，历史已丢弃；请重新查看文件确认现状）"
 

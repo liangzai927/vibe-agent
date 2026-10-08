@@ -52,6 +52,8 @@ class RunBash(Tool):
         "required": ["command"],
     }
     requires_approval = True
+    # 任意命令的副作用无法追踪（可能改任意文件）——撤销栈必须如实标记
+    opaque = True
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace

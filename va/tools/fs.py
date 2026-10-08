@@ -2,11 +2,38 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from ..diffview import describe_change
 from ..util import truncate
 from ..workspace import MAX_TEXT_FILE_BYTES, Workspace, WorkspaceError
 from .base import Tool, ToolError
+
+
+def _read_for_preview(path) -> str | None:
+    """预览用读取：拿不到文本就返回 None，绝不因为预览失败而阻断流程。"""
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_TEXT_FILE_BYTES:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _arg_path(workspace: Workspace, args: dict[str, Any]) -> Path | None:
+    """从工具参数里安全地取出目标路径。
+
+    类型不对或越界一律返回 None —— 参数不符合 schema 时应该明确拒绝，
+    而不是靠 ``Path(str(x))`` 把整数 123 悄悄变成一个名叫 "123" 的文件。
+    """
+    raw = args.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return workspace.resolve(raw)
+    except (WorkspaceError, OSError):
+        return None
 
 
 def _require_text(path, workspace: Workspace) -> str:
@@ -86,6 +113,24 @@ class WriteFile(Tool):
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
+    def affected_paths(self, args: dict[str, Any]) -> list[Path]:
+        target = _arg_path(self.workspace, args)
+        return [target] if target is not None else []
+
+    def preview(self, args: dict[str, Any]) -> str | None:
+        target = _arg_path(self.workspace, args)
+        new_content = args.get("content")
+        if target is None or not isinstance(new_content, str):
+            return None
+
+        old_content = _read_for_preview(target) or ""
+        rel = self.workspace.relative(target)
+        if target.exists() and not target.is_file():
+            return f"⚠ {rel} 是目录，这次写入会失败。"
+        return describe_change(
+            rel if target.exists() else f"{rel} (新文件)", old_content, new_content
+        )
+
     def run(self, path: str, content: str, **_: Any) -> str:
         target = self.workspace.resolve(path)
         if target.is_dir():
@@ -122,6 +167,35 @@ class EditFile(Tool):
 
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
+
+    def affected_paths(self, args: dict[str, Any]) -> list[Path]:
+        target = _arg_path(self.workspace, args)
+        return [target] if target is not None else []
+
+    def preview(self, args: dict[str, Any]) -> str | None:
+        """执行前算出真实 diff；顺带提前暴露「匹配不到 / 不唯一」这类必然失败。"""
+        target = _arg_path(self.workspace, args)
+        old_string = args.get("old_string")
+        new_string = args.get("new_string")
+        if target is None or not isinstance(old_string, str) or not isinstance(new_string, str):
+            return None
+
+        rel = self.workspace.relative(target)
+        text = _read_for_preview(target)
+        if text is None:
+            return f"⚠ {rel} 不存在或不是可读文本，这次编辑会失败。"
+
+        count = text.count(old_string)
+        replace_all = bool(args.get("replace_all", False))
+        if old_string == new_string:
+            return "⚠ old_string 与 new_string 相同，这次编辑会失败。"
+        if count == 0:
+            return f"⚠ 在 {rel} 中找不到 old_string，这次编辑会失败。"
+        if count > 1 and not replace_all:
+            return f"⚠ old_string 在 {rel} 中出现了 {count} 次，不唯一，这次编辑会失败。"
+
+        updated = text.replace(old_string, new_string) if replace_all else text.replace(old_string, new_string, 1)
+        return describe_change(rel, text, updated)
 
     def run(
         self,

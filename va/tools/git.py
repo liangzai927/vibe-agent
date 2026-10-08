@@ -193,6 +193,7 @@ class GitCreateBranch(_GitTool):
         "required": ["name"],
     }
     requires_approval = True
+    opaque = True  # 切换分支会整体替换工作树内容，无法用文件快照还原
 
     def run(self, name: str, base: str | None = None, **_: Any) -> str:
         self._ensure_repo()
@@ -221,6 +222,7 @@ class GitCheckout(_GitTool):
         "required": ["branch"],
     }
     requires_approval = True
+    opaque = True  # 切换分支会整体替换工作树内容
 
     def run(self, branch: str, **_: Any) -> str:
         self._ensure_repo()

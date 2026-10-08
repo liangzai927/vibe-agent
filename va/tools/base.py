@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Iterator
 
 from ..util import red
@@ -25,6 +26,9 @@ class Tool(ABC):
     description: str = ""
     parameters: dict[str, Any] = {}
     requires_approval: bool = False
+    # True 表示可能有无法追踪的文件副作用（如执行任意 shell 命令、切换工作树），
+    # 撤销栈无法可靠回退这类操作，会如实标记而不是假装成功。
+    opaque: bool = False
 
     @abstractmethod
     def run(self, **kwargs: Any) -> str: ...
@@ -38,6 +42,18 @@ class Tool(ABC):
                 "parameters": self.parameters,
             },
         }
+
+    def preview(self, args: dict[str, Any]) -> str | None:
+        """执行前给用户看的人类可读预览（通常是一份 diff）。
+
+        返回 None 表示没有更好的呈现方式，UI 会退回到展示原始参数。
+        这里必须容错：预览失败不应该阻断审批流程。
+        """
+        return None
+
+    def affected_paths(self, args: dict[str, Any]) -> list[Path]:
+        """这次调用可能改动哪些文件——主循环会在执行前对它们抓快照。"""
+        return []
 
     def summarize(self, args: dict[str, Any]) -> str:
         """一行人类可读的调用摘要，用于终端展示。"""
