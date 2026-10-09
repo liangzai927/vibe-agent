@@ -286,6 +286,11 @@ class RenderPage(_RenderTool):
 
 class PixelDiff(_RenderTool):
     name = "pixel_diff"
+    # 基准图可能在工作区外（设计稿在下载目录），渲染图总是我们自己生成的
+    _external_arg = "baseline"
+
+    def needs_approval(self, args):
+        return self.is_external(args.get(self._external_arg))
     description = (
         "逐像素比较两张截图，返回差异百分比并生成一张差异热力图。"
         "不需要模型、不花 token，适合用来判断「改了之后是不是更接近设计稿了」。"
@@ -318,7 +323,7 @@ class PixelDiff(_RenderTool):
                 "安装：pip install pillow（或 pip install -r requirements-browser.txt）"
             )
 
-        base_path = self.resolve(baseline, what="基准图")
+        base_path = self.resolve_readable(baseline, what="基准图")
         actual_path = self.resolve(actual, what="渲染图")
 
         if output:
@@ -386,6 +391,10 @@ COMPARE_PROMPT = """你在做 UI 还原度评审。
 
 class CompareWithDesign(_RenderTool):
     name = "compare_with_design"
+    _external_arg = "design"
+
+    def needs_approval(self, args):
+        return self.is_external(args.get(self._external_arg))
     description = (
         "把设计稿和实际渲染截图交给多模态模型做还原度评审，返回「哪里不像、该先改什么」。"
         "需要配置 VA_VISION_MODEL；没配的话改用 pixel_diff 做客观像素对比。"
@@ -411,7 +420,7 @@ class CompareWithDesign(_RenderTool):
     ) -> str:
         cfg = self.require_vision()
 
-        design_path = self.resolve(design, what="设计稿")
+        design_path = self.resolve_readable(design, what="设计稿")
         rendered_path = self.resolve(rendered, what="渲染截图")
 
         # 先给一个客观数字，避免模型的描述和实际差得太远

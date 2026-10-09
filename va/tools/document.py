@@ -271,6 +271,17 @@ class ReadDocument(WorkspaceTool):
     }
     requires_approval = False
 
+    def preview(self, args):
+        return self.external_preview(args, "path")
+
+    def needs_approval(self, args):
+        """读工作区外的文档要先问。
+
+        需求文档和设计稿一样，经常不在项目里（下载目录、桌面）。
+        但文本文件越界的风险比图片高——问一声，把路径摆给用户看。
+        """
+        return self.is_external(args.get("path"))
+
     def run(
         self,
         path: str,
@@ -280,7 +291,7 @@ class ReadDocument(WorkspaceTool):
         outline: bool = False,
         **_: Any,
     ) -> str:
-        target = self.resolve(path, what="文档")
+        target = self.resolve_readable(path, what="文档")
         if target.is_dir():
             raise ToolError(f"{path} 是目录，不是文档")
 

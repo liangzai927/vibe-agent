@@ -88,6 +88,13 @@ class ReadDesign(WorkspaceTool):
     }
     requires_approval = False  # 只读图、写自己的产物目录，不碰业务代码
 
+    def preview(self, args):
+        return self.external_preview(args, "image")
+
+    def needs_approval(self, args):
+        """读工作区外的设计稿要先问一声——它会把图片内容发给视觉模型。"""
+        return self.is_external(args.get("image"))
+
     def run(
         self,
         image: str,
@@ -96,7 +103,7 @@ class ReadDesign(WorkspaceTool):
         **_: Any,
     ) -> str:
         cfg = self.require_vision()
-        image_path = self.resolve(image, what="设计稿")
+        image_path = self.resolve_readable(image, what="设计稿")
 
         try:
             data_url = image_data_url(image_path)

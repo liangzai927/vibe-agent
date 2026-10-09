@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg.max_iterations = args.max_steps
 
     try:
-        workspace = Workspace(cfg.workspace)
+        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs)
     except WorkspaceError as exc:
         print(red(f"工作区错误：{exc}"), file=sys.stderr)
         return 2
@@ -505,7 +505,7 @@ def _doctor(argv: list[str]) -> int:
         except OSError:
             pass
     try:
-        workspace = Workspace(root)
+        workspace = Workspace(root, extra_read_roots=cfg.read_dirs)
     except WorkspaceError as exc:
         print(red(f"工作区问题：{exc}"), file=sys.stderr)
         return 1
@@ -566,7 +566,7 @@ def _web(argv: list[str]) -> int:
         cfg.max_iterations = args.max_steps
 
     try:
-        workspace = Workspace(cfg.workspace)
+        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs)
     except WorkspaceError as exc:
         print(red(f"工作区错误：{exc}"), file=sys.stderr)
         return 2
@@ -866,7 +866,7 @@ def _feature(argv: list[str]) -> int:
     cfg.require_key()
 
     try:
-        workspace = Workspace(cfg.workspace)
+        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs)
     except WorkspaceError as exc:
         print(red(f"工作区错误：{exc}"), file=sys.stderr)
         return 2

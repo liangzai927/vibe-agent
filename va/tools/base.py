@@ -33,6 +33,15 @@ class Tool(ABC):
     @abstractmethod
     def run(self, **kwargs: Any) -> str: ...
 
+    def needs_approval(self, args: dict[str, Any]) -> bool:
+        """这一次调用要不要先问用户。
+
+        默认看类属性。工具可以按参数决定——比如「读工作区里的图」不用问，
+        「读 ~/Downloads 里的图」要问。判定放在工具里而不是主循环里，
+        因为只有工具自己知道哪个参数是路径。
+        """
+        return self.requires_approval
+
     def schema(self) -> dict[str, Any]:
         return {
             "type": "function",

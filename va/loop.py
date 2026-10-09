@@ -283,7 +283,7 @@ class Agent:
                 if tool.opaque:
                     self.undo.mark_opaque(checkpoint, f"{call.name} 的副作用无法追踪")
 
-                if tool.requires_approval and not self._approved(call, args, tool):
+                if tool.needs_approval(args) and not self._approved(call, args, tool):
                     message = "用户拒绝执行该操作。请换一种方式，或询问用户希望怎么做。"
                     self.ui.tool_result("用户拒绝", ok=False)
                     self._append(tool_message(call.id, message))

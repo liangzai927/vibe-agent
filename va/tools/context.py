@@ -91,6 +91,52 @@ class WorkspaceTool(Tool):
         except WorkspaceError as exc:
             raise ToolError(f"找不到{what} {path!r}：{exc}") from exc
 
+    # ---------------------------------------------------- 读工作区外的文件
+
+    def is_external(self, path: str | None) -> bool:
+        """这个路径在工作区外、且没被 VA_READ_DIRS 预先放行吗。"""
+        if not path:
+            return False
+        try:
+            return self.workspace.needs_external_approval(path)
+        except Exception:  # noqa: BLE001 - 判不出来就当外部，宁可多问一次
+            return True
+
+    def resolve_readable(self, path: str, *, what: str = "文件") -> Path:
+        """解析一个只用于读取的路径，允许落在工作区外。
+
+        **写操作永远不要用这个。** 它存在的唯一理由是：用户手上那张设计稿
+        在 ~/Downloads，而不是在项目里。调用方有义务配套实现
+        ``needs_approval()``，否则越界读取就没有任何拦截了。
+        """
+        try:
+            return self.workspace.resolve_readable(path, must_exist=True)
+        except WorkspaceError as exc:
+            raise ToolError(f"找不到{what} {path!r}：{exc}") from exc
+
+    def external_preview(self, args: dict, arg_name: str) -> str | None:
+        """越界读取时在审批框里显示的话。工作区内的返回 None（不用多嘴）。
+
+        顺带点出 VA_READ_DIRS——不然用户会以为每次都得点同意，
+        而「每次都问」和「不能用」在体感上差不多。
+        """
+        path = args.get(arg_name)
+        if not self.is_external(path):
+            return None
+        try:
+            parent = Path(str(path)).expanduser().parent
+        except (OSError, RuntimeError):
+            parent = None
+        lines = [
+            f"⚠ 要读工作区外的文件：{path}",
+            "",
+            "读图片/文档允许越界（设计稿常常不在项目里），但每次都会先问。",
+        ]
+        if parent:
+            lines.append(f"把这个目录加进 .env 就不用再问：VA_READ_DIRS={parent}")
+        lines.append("写操作和静默的文本读取仍然锁死在工作区内。")
+        return "\n".join(lines)
+
     def output_path(self, path: str | None, default: str) -> Path:
         """产物落盘路径：给了就用给的，没给就用默认值（相对工作区）。"""
         return self.workspace.resolve(path) if path else self.workspace.resolve(default)

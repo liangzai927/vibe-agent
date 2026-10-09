@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
@@ -42,6 +42,30 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _split_paths(raw: str | None) -> list[str]:
+    """把 VA_READ_DIRS 拆成目录列表。
+
+    用 os.pathsep 而不是逗号：POSIX 上的文件名可以合法地含逗号，
+    而 pathsep（POSIX 是 ``:``）是这类列表的通用约定。
+    也容忍用户顺手写逗号——Windows 上逗号更常见。
+    """
+    if not raw:
+        return []
+    parts: list[str] = []
+    for chunk in raw.replace(",", os.pathsep).split(os.pathsep):
+        chunk = chunk.strip()
+        if chunk:
+            parts.append(os.path.expanduser(chunk))
+    # 去重但保持顺序
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in parts:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
 @dataclass(slots=True)
 class Config:
     workspace: Path
@@ -58,6 +82,11 @@ class Config:
     # 子 agent 最多嵌套几层。默认 1 = 主 agent 能委派，子 agent 不能再往下派。
     # 刻意不鼓励调大：失控的成本和难以追踪的调用链，换不来多少实际收益。
     max_delegate_depth: int = 1
+    # ---- 允许读取工作区外文件的目录 ----
+    # 设计稿、需求文档经常不在项目里（下载目录、桌面）。列在这里的目录
+    # 读起来不再逐次询问；不列的每次都会问，并把完整路径摆给用户看。
+    # 分隔符用 os.pathsep（POSIX 是 :，Windows 是 ;）。
+    read_dirs: list[str] = field(default_factory=list)
     # ---- 视觉模型（用于「截图 vs 设计图」比对，可选）----
     # 主模型多数不支持图片（如 deepseek-chat），所以单独配一个多模态模型。
     vision_model: str = ""
@@ -121,6 +150,7 @@ class Config:
             show_thinking=(os.environ.get("VA_SHOW_THINKING", "1").strip().lower() in _TRUTHY),
             context_budget=int(os.environ.get("VA_CONTEXT_BUDGET", "60000") or 60000),
             max_delegate_depth=max(0, int(os.environ.get("VA_MAX_DELEGATE_DEPTH", "1") or 1)),
+            read_dirs=_split_paths(os.environ.get("VA_READ_DIRS")),
             vision_model=(os.environ.get("VA_VISION_MODEL") or "").strip(),
             vision_base_url=(os.environ.get("VA_VISION_BASE_URL") or "").strip(),
             vision_api_key=(os.environ.get("VA_VISION_API_KEY") or "").strip(),

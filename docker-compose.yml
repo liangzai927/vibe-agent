@@ -64,6 +64,8 @@ x-common: &common
     - VA_VISION_API_KEY
     - VA_VISION_BASE_URL
     - VA_VISION_MODEL
+    # 容器里的路径和宿主机不同，列之前先想清楚挂载点
+    - VA_READ_DIRS
     # ---- 渲染 ----
     - VA_BROWSER_CHANNEL
     - VA_BROWSER_EXECUTABLE

@@ -51,7 +51,18 @@ class InspectImage(WorkspaceTool):
         },
         "required": ["path"],
     }
-    requires_approval = False  # 纯读取，不改任何东西
+    requires_approval = False  # 读工作区内的图不需要审批
+
+    def preview(self, args):
+        return self.external_preview(args, "path")
+
+    def needs_approval(self, args):
+        """只有读工作区外的图片才问。
+
+        设计稿常常躺在 ~/Desktop 或 ~/Downloads，不在项目里。
+        把那个目录加进 VA_READ_DIRS 就不用每次都问。
+        """
+        return self.is_external(args.get("path"))
 
     def run(
         self,
@@ -64,7 +75,7 @@ class InspectImage(WorkspaceTool):
         if not pillow_available():
             raise ToolError(f"没有安装 Pillow，读不了图片像素。\n{INSTALL_HINT}")
 
-        target = self.resolve(path, what="图片")
+        target = self.resolve_readable(path, what="图片")
 
         try:
             report = inspect_image(target, cols=cols, rows=rows, palette_size=colors)
