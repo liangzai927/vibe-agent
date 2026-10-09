@@ -131,7 +131,7 @@ class ReadDesign(WorkspaceTool):
         except LLMError as exc:
             raise ToolError(
                 f"视觉模型调用失败：{exc}\n"
-                f"（当前视觉模型：{cfg.vision_model} @ {cfg.vision_base_url or cfg.base_url}）"
+                f"（当前视觉模型：{self.vision_label(cfg)} @ {cfg.vision_base_url or cfg.base_url}）"
             ) from exc
 
         spec = (turn.content or "").strip()
@@ -145,7 +145,7 @@ class ReadDesign(WorkspaceTool):
 
         header = [
             f"已解析设计稿 {self.rel(image_path)}",
-            f"  视觉模型  {cfg.vision_model}",
+            f"  视觉模型  {self.vision_label(cfg)}",
         ]
         if saved_path is not None:
             header.append(

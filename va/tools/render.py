@@ -463,12 +463,12 @@ class CompareWithDesign(_RenderTool):
         except LLMError as exc:
             raise ToolError(
                 f"视觉模型调用失败：{exc}\n"
-                f"（当前视觉模型：{cfg.vision_model} @ {cfg.vision_base_url or cfg.base_url}）"
+                f"（当前视觉模型：{self.vision_label(cfg)} @ {cfg.vision_base_url or cfg.base_url}）"
             ) from exc
 
         return (
             f"{pixel_note}\n"
-            f"视觉模型：{cfg.vision_model}（图中顺序：先设计稿，后实际渲染）\n\n"
+            f"视觉模型：{self.vision_label(cfg)}（图中顺序：先设计稿，后实际渲染）\n\n"
             f"{turn.content.strip()}"
         )
 

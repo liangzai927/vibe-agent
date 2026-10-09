@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import base64
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -19,6 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import va.llm  # noqa: E402
 from helpers import AgentTestCase  # noqa: E402
 from va.messages import AssistantTurn  # noqa: E402
+from va.config import Config, replace  # noqa: E402
+from va.workspace import Workspace  # noqa: E402
+from va.prompts import build_system_prompt  # noqa: E402
+from va.tools import build_registry  # noqa: E402
 from va.tools.base import ToolError  # noqa: E402
 from va.tools.context import VISION_HINT  # noqa: E402
 from va.tools.design import DESIGN_DIR, MAX_SPEC_CHARS, ReadDesign  # noqa: E402
@@ -248,6 +253,134 @@ class TestToolContract(DesignTestCase):
                 self.tool().run(image="design.png")
 
         self.assertEqual(seen, ["gpt-4o"], "没有用视觉模型，而是用了主模型")
+
+
+class TestMainModelVisionFallback(unittest.TestCase):
+    """没配 VA_VISION_MODEL 时，主模型自己能读图就直接沿用。
+
+    不这么做会撞见一个很别扭的局面：用户用的模型明明支持图片输入，
+    工具却告诉他「没有视觉模型」——于是 agent 转头去写脚本调 API，
+    绕过自己的整套工具和审批。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "pic.png").write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            )
+        )
+        self.workspace = Workspace(self.root)
+
+    def make(self, model: str, vision: str = "", catalog_models=None):
+        cfg = Config(
+            workspace=self.root, model=model, api_key="k", base_url="https://x/v1"
+        )
+        if vision:
+            cfg = replace(cfg, vision_model=vision)
+        tool = ReadDesign(self.workspace, cfg)
+
+        from va.models import ModelCatalog, ModelInfo
+
+        catalog = ModelCatalog(base_url="https://x/v1", models=catalog_models or [])
+        with mock.patch("va.models.load_catalog", return_value=catalog):
+            reads = tool.main_model_reads_images()
+            if not reads and not vision:
+                with self.assertRaises(ToolError):
+                    tool.require_vision()
+                return tool, None
+            return tool, tool.require_vision()
+
+    def test_falls_back_when_main_model_reads_images(self):
+        from va.models import ModelInfo
+
+        _, cfg = self.make(
+            "seer", catalog_models=[ModelInfo(id="seer", input_modalities=["text", "image"])]
+        )
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg.vision_model, "seer")
+
+    def test_raises_when_main_model_is_text_only(self):
+        from va.models import ModelInfo
+
+        self.make("blind", catalog_models=[ModelInfo(id="blind", input_modalities=["text"])])
+
+    def test_raises_when_there_is_no_catalog(self):
+        """清单都没有就别瞎猜——给用户明确的提示。"""
+        cfg = Config(workspace=self.root, model="x", api_key="k", base_url="https://x/v1")
+        tool = ReadDesign(self.workspace, cfg)
+        with mock.patch("va.models.load_catalog", return_value=None):
+            self.assertFalse(tool.main_model_reads_images())
+            with self.assertRaises(ToolError):
+                tool.require_vision()
+
+    def test_explicit_vision_model_wins(self):
+        from va.models import ModelInfo
+
+        _, cfg = self.make(
+            "seer",
+            vision="dedicated-vision",
+            catalog_models=[ModelInfo(id="seer", input_modalities=["text", "image"])],
+        )
+        self.assertEqual(cfg.vision_model, "dedicated-vision", "显式配置优先于回退")
+
+    def test_unknown_model_does_not_fall_back(self):
+        """模型不在清单里就不下结论——宁可提示，也不要猜错。"""
+        from va.models import ModelInfo
+
+        self.make(
+            "mystery", catalog_models=[ModelInfo(id="seer", input_modalities=["text", "image"])]
+        )
+
+    def test_label_marks_the_fallback(self):
+        from va.tools.context import WorkspaceTool
+
+        cfg = Config(
+            workspace=self.root, model="seer", api_key="k", base_url="https://x/v1"
+        )
+        self.assertEqual(WorkspaceTool.vision_label(replace(cfg, vision_model="seer")),
+                         "seer（沿用主模型——它自己支持读图）")
+        self.assertEqual(WorkspaceTool.vision_label(replace(cfg, vision_model="other")),
+                         "other")
+
+
+class TestPromptGuidance(unittest.TestCase):
+    """系统提示词要教会 agent「缺配置时怎么跟用户说」。
+
+    用户的真实经历：给了张带文字的截图，agent 老老实实说「我读不出文字」
+    就结束了——正确但没用。缺的那一半是「所以你要怎么开」。
+    """
+
+    def setUp(self) -> None:
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        workspace = Workspace(root)
+        registry = build_registry(workspace)
+        self.text = build_system_prompt(workspace, registry.catalog())
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_tells_agent_to_give_the_one_line_fix(self):
+        self.assertIn("VA_VISION_MODEL", self.text)
+        self.assertIn("/models", self.text, "要提醒用户去哪找可读图的模型")
+
+    def test_says_same_provider_needs_no_new_account(self):
+        self.assertIn("不需要另开账号", self.text)
+
+    def test_forbids_stopping_at_i_cannot_read_it(self):
+        self.assertIn("等于把问题原样退回给用户", self.text)
+
+    def test_mentions_external_reads_are_allowed(self):
+        """越界读取是正常路径，不该被 agent 当成「读不了」。"""
+        self.assertIn("工作区外", self.text)
+        self.assertIn("不要因此判定", self.text)
+
+    def test_has_a_fallback_for_the_no_model_case(self):
+        self.assertIn("inspect_image", self.text)
 
 
 class TestVisionHint(unittest.TestCase):

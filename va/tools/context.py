@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -76,11 +76,47 @@ class WorkspaceTool(Tool):
             self._cfg = Config.load(self.workspace.root)
         return self._cfg
 
-    def require_vision(self) -> Config:
+    def main_model_reads_images(self) -> bool:
+        """主模型自己就是多模态的吗。
+
+        只看缓存的模型清单（首次配置时拉下来的）。清单过期或没有清单时
+        返回 False——宁可让用户看到明确的提示，也不要瞎猜。
+        """
         cfg = self.config()
-        if not cfg.has_vision:
-            raise ToolError(VISION_HINT)
-        return cfg
+        if not cfg:
+            return False
+        try:
+            from ..models import load_catalog
+
+            catalog = load_catalog(Path(__file__).resolve().parents[2])
+        except Exception:  # noqa: BLE001 - 读不到清单就别下结论
+            return False
+        if catalog is None:
+            return False
+        info = catalog.find(cfg.model)
+        return bool(info and info.supports_image)
+
+    @staticmethod
+    def vision_label(cfg: Config) -> str:
+        """视觉模型的展示文案。沿用主模型时要点明，否则用户会以为自己配过。"""
+        if cfg.vision_model == cfg.model:
+            return f"{cfg.vision_model}（沿用主模型——它自己支持读图）"
+        return cfg.vision_model
+
+    def require_vision(self) -> Config:
+        """拿到视觉配置。
+
+        没单独配 VA_VISION_MODEL 时，**先看主模型自己能不能读图**——
+        能读就直接沿用它。否则用户会撞见一个很别扭的局面：
+        他用的模型明明支持图片输入，工具却告诉他「没有视觉模型」，
+        于是转头去写脚本绕过工具。
+        """
+        cfg = self.config()
+        if cfg.has_vision:
+            return cfg
+        if self.main_model_reads_images():
+            return replace(cfg, vision_model=cfg.model)
+        raise ToolError(VISION_HINT)
 
     # ------------------------------------------------------------------ 路径
 
