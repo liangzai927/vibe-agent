@@ -18,12 +18,22 @@ from .base import Tool, ToolError
 
 VISION_HINT = (
     "没有配置视觉模型，读不了图。\n"
-    "主模型通常不支持读图（deepseek-chat 就不支持），需要单独配一个多模态模型：\n"
+    "主模型通常不支持读图（deepseek-chat 就不支持），要单独指一个多模态模型。\n"
+    "\n"
+    "**先看你现在的服务商有没有能读图的模型**——同源的话不用另开账号、不用另一个 key：\n"
+    "  /models 会标注哪些模型「可读图」，然后只写一行就够了（地址和 key 自动沿用主配置）：\n"
+    "    VA_VISION_MODEL=<那个模型名>\n"
+    "\n"
+    "跨服务商才需要写全：\n"
     "  VA_VISION_MODEL=gpt-4o\n"
     "  VA_VISION_BASE_URL=https://api.openai.com/v1\n"
     "  VA_VISION_API_KEY=sk-...\n"
-    "不想配模型的话：渲染与像素对比（render_page / pixel_diff）完全不需要模型，"
-    "照样能驱动 UI 迭代，只是少了「该改什么」的自然语言提示。"
+    "\n"
+    "完全不想配模型也行，这几条路不需要模型：\n"
+    "  inspect_image  尺寸、主色 hex、内容区边界、字符布局图——写 CSS 够用了\n"
+    "  render_page    渲染真实页面\n"
+    "  pixel_diff     和设计稿逐像素对比，差异百分比是客观判据\n"
+    "少的是「该改什么」的自然语言提示，以及图上的文字和语义。"
 )
 
 

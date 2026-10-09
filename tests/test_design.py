@@ -20,6 +20,7 @@ import va.llm  # noqa: E402
 from helpers import AgentTestCase  # noqa: E402
 from va.messages import AssistantTurn  # noqa: E402
 from va.tools.base import ToolError  # noqa: E402
+from va.tools.context import VISION_HINT  # noqa: E402
 from va.tools.design import DESIGN_DIR, MAX_SPEC_CHARS, ReadDesign  # noqa: E402
 
 # 1x1 透明 PNG。硬编码一份，这样测试不依赖 Pillow。
@@ -247,6 +248,34 @@ class TestToolContract(DesignTestCase):
                 self.tool().run(image="design.png")
 
         self.assertEqual(seen, ["gpt-4o"], "没有用视觉模型，而是用了主模型")
+
+
+class TestVisionHint(unittest.TestCase):
+    """这段提示是用户唯一能看到的「怎么办」，必须把最省事的那条路放前面。
+
+    很多人第一反应是「又要去 OpenAI 申请一个 key」，而实际上
+    当前服务商自己就可能有能读图的模型——同源、同一个 key、少一个账号。
+    """
+
+    def test_mentions_same_provider_option_first(self):
+        self.assertIn("服务商", VISION_HINT)
+        self.assertIn("/models", VISION_HINT, "要告诉用户去哪找可读图的模型")
+        self.assertLess(
+            VISION_HINT.index("/models"),
+            VISION_HINT.index("api.openai.com"),
+            "同源方案应该排在跨服务商方案前面",
+        )
+
+    def test_says_address_and_key_are_inherited(self):
+        self.assertIn("自动沿用", VISION_HINT)
+
+    def test_lists_the_no_model_alternatives(self):
+        for tool in ("inspect_image", "render_page", "pixel_diff"):
+            self.assertIn(tool, VISION_HINT, f"应该告诉用户 {tool} 不需要模型")
+
+    def test_still_shows_the_cross_provider_recipe(self):
+        for key in ("VA_VISION_MODEL", "VA_VISION_BASE_URL", "VA_VISION_API_KEY"):
+            self.assertIn(key, VISION_HINT)
 
 
 if __name__ == "__main__":

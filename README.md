@@ -428,6 +428,21 @@ review_changes(requirement=...)       专门的代码审查
 
 闭环是：**读设计稿 → 改代码 → render_page → pixel_diff / compare_with_design → 按差异改 → 再渲染**。
 
+### 先说清楚：PRD 和 UI 图是两条完全不同的路
+
+| 你手上是什么 | 用哪个工具 | 要视觉模型吗 |
+|---|---|---|
+| **PRD / 需求文档**（.docx / .pdf / .md / .html） | `read_document` | **不要**。纯文本抽取 |
+| **UI 设计图**（截图 / Figma 导出 / 原型图） | `read_design` | **要** |
+| UI 图，但不想配模型 | `inspect_image` | **不要**。给尺寸、配色 hex、布局结构 |
+
+`read_document` 是零依赖的文本抽取：Markdown / 文本 / HTML 直接读，
+`.docx` 要 `python-docx`，`.pdf` 要 `pypdf`（都在 `requirements-docs.txt` 里）。
+**它和视觉模型没有任何关系**——PRD 是文字，不需要「看图」。
+
+`.pdf` 有一个例外：**扫描件**（整页是图片、没有文字层）抽不出东西，
+这时会明确告诉你去用 OCR 或 `read_design`，而不是返回一个空文档让你困惑。
+
 ### 没有视觉模型也能做 UI
 
 `inspect_image` 纯靠像素统计，不调用任何 API：
