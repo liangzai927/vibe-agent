@@ -36,8 +36,7 @@ DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 800
 DEFAULT_TIMEOUT_MS = 30_000
 MAX_TIMEOUT_MS = 180_000
-SCREENSHOT_DIR = ".va/screenshots"
-DEFAULT_DIFF_DIR = ".va/screenshots/diffs"
+from ..paths import describe, diffs_dir, screenshots_dir
 
 
 def _clamp(value: int, low: int, high: int) -> int:
@@ -84,7 +83,7 @@ class RenderPage(_RenderTool):
             },
             "output": {
                 "type": "string",
-                "description": f"截图保存路径（默认 {SCREENSHOT_DIR}/ 下自动命名）",
+                "description": "截图保存路径（默认存到 agent 自己的目录下，自动命名）",
             },
             "width": {"type": "integer", "description": f"视口宽度，默认 {DEFAULT_WIDTH}"},
             "height": {"type": "integer", "description": f"视口高度，默认 {DEFAULT_HEIGHT}"},
@@ -228,7 +227,9 @@ class RenderPage(_RenderTool):
         if output:
             return self.workspace.resolve(output)
         stem = re.sub(r"[^A-Za-z0-9]+", "-", target).strip("-")[-40:] or "page"
-        return self.workspace.resolve(f"{SCREENSHOT_DIR}/{stem}-{time.strftime('%H%M%S')}.png")
+        return self.workspace.resolve_output(
+            screenshots_dir() / f"{stem}-{time.strftime('%H%M%S')}.png"
+        )
 
     def _report(
         self,
@@ -300,7 +301,7 @@ class PixelDiff(_RenderTool):
         "properties": {
             "baseline": {"type": "string", "description": "基准图路径（通常是设计稿）"},
             "actual": {"type": "string", "description": "实际渲染图路径"},
-            "output": {"type": "string", "description": f"差异图保存路径（默认 {DEFAULT_DIFF_DIR}/ 下）"},
+            "output": {"type": "string", "description": "差异图保存路径（默认存到 agent 自己的目录下）"},
             "threshold": {
                 "type": "integer",
                 "description": "单通道差值超过多少算不同，默认 16。调高可忽略抗锯齿噪声",
@@ -330,7 +331,7 @@ class PixelDiff(_RenderTool):
             out_path = self.workspace.resolve(output)
         else:
             stem = actual_path.stem
-            out_path = self.workspace.resolve(f"{DEFAULT_DIFF_DIR}/{stem}-diff.png")
+            out_path = self.workspace.resolve_output(diffs_dir() / f"{stem}-diff.png")
 
         try:
             result = pixel_diff(

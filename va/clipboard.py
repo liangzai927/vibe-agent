@@ -287,10 +287,15 @@ def default_filename(prefix: str = "clip") -> str:
     return f"{prefix}-{time.strftime('%Y%m%d-%H%M%S')}.png"
 
 
-def inbox_dir(workspace_root: str | Path) -> Path:
+def inbox_dir(workspace_root: str | Path | None = None) -> Path:
     """剪贴板图片的默认落脚点。
 
-    放在工作区的 .va/ 下——它本来就被建议加进 .gitignore，
-    而且是「临时素材」，不该混进业务代码目录。
+    **放在 agent 自己的目录下，不在工作区里。** 粘贴和拖拽进来的图片是
+    临时素材，扔进用户的项目只会积垃圾——`git status` 会一直脏着，
+    用户还得自己去加 .gitignore。
+
+    参数保留是为了兼容旧调用，已经不再使用。
     """
-    return Path(workspace_root) / ".va" / "inbox"
+    from .paths import inbox_dir as home_inbox
+
+    return home_inbox()

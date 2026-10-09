@@ -116,13 +116,15 @@ class TestWorkspaceReadable(AgentTestCase):
 
     def test_nonexistent_extra_root_is_ignored(self):
         ws = Workspace(self.root, extra_read_roots=["/definitely/not/here"])
-        self.assertEqual(ws.extra_read_roots, [])
+        self.assertNotIn(Path("/definitely/not/here"), ws.extra_read_roots)
+        self.assertEqual(ws._user_read_roots, 0)
 
     def test_file_as_extra_root_is_ignored(self):
         """写成一个文件而不是目录，不该被当成放行。"""
         (self.root / "notadir.txt").write_text("x", encoding="utf-8")
         ws = Workspace(self.root, extra_read_roots=[str(self.root / "notadir.txt")])
-        self.assertEqual(ws.extra_read_roots, [])
+        self.assertNotIn((self.root / "notadir.txt").resolve(), ws.extra_read_roots)
+        self.assertEqual(ws._user_read_roots, 0)
 
     def test_resolve_is_still_strict(self):
         """核心安全属性：resolve() 不许越界。"""

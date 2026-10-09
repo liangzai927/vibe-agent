@@ -26,7 +26,8 @@ from va.prompts import build_system_prompt  # noqa: E402
 from va.tools import build_registry  # noqa: E402
 from va.tools.base import ToolError  # noqa: E402
 from va.tools.context import VISION_HINT  # noqa: E402
-from va.tools.design import DESIGN_DIR, MAX_SPEC_CHARS, ReadDesign  # noqa: E402
+from va.paths import designs_dir  # noqa: E402
+from va.tools.design import MAX_SPEC_CHARS, ReadDesign  # noqa: E402
 
 # 1x1 透明 PNG。硬编码一份，这样测试不依赖 Pillow。
 TINY_PNG = base64.b64decode(
@@ -164,9 +165,9 @@ class TestSaving(DesignTestCase):
         with mock.patch.object(va.llm.LLM, "complete", fake_complete()):
             out = self.tool().run(image="design.png")
 
-        saved = self.root / DESIGN_DIR / "design.md"
+        saved = designs_dir() / "design.md"
         self.assertTrue(saved.is_file(), "规格没有落盘")
-        self.assertIn(f"{DESIGN_DIR}/design.md", out)
+        self.assertIn("design.md", out)
         body = saved.read_text(encoding="utf-8")
         self.assertIn("## 画布", body)
         self.assertIn("read_design 生成", body, "应该留下来源标记")
@@ -180,7 +181,7 @@ class TestSaving(DesignTestCase):
     def test_empty_save_disables_persistence(self):
         with mock.patch.object(va.llm.LLM, "complete", fake_complete()):
             out = self.tool().run(image="design.png", save="")
-        self.assertFalse((self.root / DESIGN_DIR).exists())
+        self.assertFalse((designs_dir() / "design.md").exists())
         self.assertNotIn("规格文件", out)
         self.assertIn("## 画布", out, "即使不落盘，内容也要返回")
 
@@ -204,7 +205,7 @@ class TestSaving(DesignTestCase):
         self.assertTrue(truncated, "返回给模型的规格应该被截断")
         self.assertTrue("省略" in out)
 
-        saved = (self.root / DESIGN_DIR / "design.md").read_text(encoding="utf-8")
+        saved = (designs_dir() / "design.md").read_text(encoding="utf-8")
         self.assertGreater(len(saved), len(long_spec), "落盘的必须是完整规格")
         self.assertIn(long_spec[-50:], saved, "落盘内容被截断了")
 
@@ -218,7 +219,7 @@ class TestSaving(DesignTestCase):
         other.write_bytes(TINY_PNG)
         with mock.patch.object(va.llm.LLM, "complete", fake_complete()):
             self.tool().run(image="登录页.png")
-        self.assertTrue((self.root / DESIGN_DIR / "登录页.md").is_file())
+        self.assertTrue((designs_dir() / "登录页.md").is_file())
 
 
 class TestToolContract(DesignTestCase):

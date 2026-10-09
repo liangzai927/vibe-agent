@@ -6,11 +6,25 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+# --------------------------------------------------------------- 隔离真实目录
+#
+# agent 的产物（设计稿规格、截图、上传的图片）默认落在 ~/.vibe-agent/ 下。
+# 测试绝不能往那儿写——那是开发者真实的数据，跑一次测试就给人家塞一堆文件。
+# 这里统一切到临时目录，整个测试进程共用一份，退出时删掉。
+#
+# 注意必须在导入 va 之前设好：Workspace.__init__ 会读 VA_HOME。
+_TEST_HOME = Path(tempfile.mkdtemp(prefix="va-test-home-"))
+os.environ["VA_HOME"] = str(_TEST_HOME)
+atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -155,10 +169,24 @@ class QuietUI(SilentUI):
         return False
 
 
+def reset_agent_home() -> None:
+    """清空测试用的 agent home。
+
+    它是进程级共享的临时目录。不清的话，上一个测试写下的
+    ``designs/x.md`` 会让下一个测试的「这个文件不该存在」假失败。
+    """
+    for child in _TEST_HOME.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
 class AgentTestCase(unittest.TestCase):
     """提供临时工作区 + 配置 + 装配好 Agent 的基类。"""
 
     def setUp(self) -> None:
+        reset_agent_home()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.cfg = Config(

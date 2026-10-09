@@ -488,10 +488,15 @@ class TestWebApp(AgentTestCase):
         self.assertTrue(any("炸了" in n["text"] for n in notes))
 
     def test_save_upload(self):
+        """上传的图片落在 agent 自己的目录，不进用户的项目。"""
         app, _ = self.app(ScriptedLLM())
         info = app.save_upload("图.png", b"\x89PNG\r\n\x1a\n" + b"0" * 40)
-        self.assertTrue(Path(info["path"]).is_file())
-        self.assertEqual(info["relative"], ".va/inbox/图.png")
+        stored = Path(info["path"])
+        self.assertTrue(stored.is_file())
+        self.assertEqual(stored.name, "图.png")
+        self.assertNotIn(
+            str(self.root), str(stored), "不该写进工作区——那会污染用户的项目"
+        )
         self.assertEqual(info["bytes"], 48)
 
     def test_save_upload_forces_an_image_extension(self):
@@ -500,10 +505,11 @@ class TestWebApp(AgentTestCase):
         self.assertTrue(info["path"].endswith("evil.sh.png"))
 
     def test_save_upload_strips_directory_components(self):
-        """别让 ../../ 把文件写到工作区外面去。"""
+        """别让 ../../ 决定文件落到哪去。"""
         app, _ = self.app(ScriptedLLM())
         info = app.save_upload("../../escape.png", b"x")
-        self.assertEqual(info["relative"], ".va/inbox/escape.png")
+        self.assertEqual(Path(info["path"]).name, "escape.png")
+        self.assertEqual(Path(info["path"]).parent.name, "inbox")
 
 
 # --------------------------------------------------------------- HTTP 层

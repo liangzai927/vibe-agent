@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .paths import agent_home
 from .util import dim
 
 # 这些目录不参与遍历/搜索，避免把 agent 拖进依赖地狱
@@ -72,15 +73,27 @@ class Workspace:
         self.root = Path(root).expanduser().resolve()
         if not self.root.is_dir():
             raise WorkspaceError(f"工作区不存在或不是目录：{self.root}")
+        # agent 自己的家目录永远可读：设计稿规格、截图都存那儿，
+        # 上下文被压缩之后 agent 得能 read_file 把规格取回来。
+        #
+        # 必须 resolve()：macOS 上 /tmp 是 /private/tmp 的符号链接，
+        # 一边 resolve 过一边没有的话，同一路径会比不相等。
+        try:
+            self.home = agent_home().resolve()
+        except (OSError, RuntimeError):
+            self.home = agent_home()
+
         # 预先放行的额外读取目录（VA_READ_DIRS）。放进来之后读它们不再询问。
-        self.extra_read_roots: list[Path] = []
+        self.extra_read_roots: list[Path] = [self.home]
+        self._user_read_roots = 0
         for entry in extra_read_roots:
             try:
                 candidate = Path(str(entry)).expanduser().resolve()
             except (OSError, RuntimeError):
                 continue
-            if candidate.is_dir():
+            if candidate.is_dir() and candidate not in self.extra_read_roots:
                 self.extra_read_roots.append(candidate)
+                self._user_read_roots += 1
 
     # ------------------------------------------------------------------ 路径
 
@@ -118,6 +131,44 @@ class Workspace:
     def needs_external_approval(self, path: str | Path) -> bool:
         """读这个路径要不要先问用户。工作区内的和 VA_READ_DIRS 里的不用问。"""
         return not self.readable(path)
+
+    def writable_output(self, path: str | Path) -> bool:
+        """这个路径能不能作为 agent 的**产物**写入。
+
+        只有两处可以：工作区，以及 agent 自己的家目录。
+        ``write_file`` / ``edit_file`` 不用这个——它们是改用户代码的，
+        仍然严格限制在工作区内。
+        """
+        resolved = self._absolutise(path)
+        if resolved is None:
+            return False
+        if self.contains(resolved):
+            return True
+        return resolved == self.home or self.home in resolved.parents
+
+    def resolve_output(self, path: str | Path) -> Path:
+        """解析 agent 产物的落盘路径（设计稿规格、截图、差异图）。
+
+        允许落在工作区外——但只允许落在 agent 自己的家目录里。
+        用户的项目因此保持干净。
+        """
+        raw = Path(str(path)).expanduser()
+        candidate = raw if raw.is_absolute() else self.root / raw
+        try:
+            resolved = candidate.resolve()
+        except OSError as exc:
+            raise WorkspaceError(f"无法解析路径 {path!r}: {exc}") from exc
+
+        if not self.writable_output(resolved):
+            raise WorkspaceError(
+                f"路径越界：{path!r} 解析为 {resolved}。\n"
+                f"（产物只能写在工作区内，或 agent 自己的目录 {self.home} 下）"
+            )
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorkspaceError(f"无法创建目录 {resolved.parent}: {exc}") from exc
+        return resolved
 
     def resolve_readable(self, path: str | Path, *, must_exist: bool = False) -> Path:
         """解析一个**只用于读取**的路径，允许落在工作区外。

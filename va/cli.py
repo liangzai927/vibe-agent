@@ -260,23 +260,43 @@ def _open_session(
 
 
 def _warn_sessions_not_ignored(workspace: Workspace, ui: UI) -> None:
-    """会话写在 <workspace>/.va/ 下。如果这是 git 仓库又没忽略它，提醒一次。"""
+    """确保 <workspace>/.va/ 被 git 忽略。
+
+    图片、设计稿规格、截图现在都放在 agent 自己的目录下，不再进项目。
+    但会话记录还留在 ``.va/sessions``——它很小、纯文本，而且「这个项目的
+    对话历史」放在项目旁边更顺手。
+
+    只是提醒不管用：用户会忘。既然我们知道自己建了这个目录，就顺手把
+    .gitignore 加好，并明确告诉用户改了什么。
+    """
     import subprocess
 
     root = workspace.root
     if not (root / ".git").exists():
         return
     try:
-        result = subprocess.run(
+        if subprocess.run(
             ["git", "check-ignore", "-q", ".va"],
-            cwd=str(root),
-            capture_output=True,
-            timeout=10,
-        )
+            cwd=str(root), capture_output=True, timeout=10,
+        ).returncode == 0:
+            return  # 已经忽略了
     except (OSError, subprocess.SubprocessError):
         return
-    if result.returncode != 0:
-        ui.warn("会话文件保存在 .va/ 下，但它没有被 .gitignore 忽略。建议执行：echo '.va/' >> .gitignore")
+
+    ignore_file = root / ".gitignore"
+    try:
+        existing = ignore_file.read_text(encoding="utf-8") if ignore_file.is_file() else ""
+        if ".va/" in existing or ".va\n" in existing:
+            return
+        addition = ("\n" if existing and not existing.endswith("\n") else "") + (
+            "\n# vibe-agent 的会话记录\n.va/\n"
+        )
+        ignore_file.write_text(existing + addition, encoding="utf-8")
+    except OSError as exc:
+        ui.warn(f"没能把 .va/ 加进 .gitignore（{exc}）。手动加一下：echo '.va/' >> .gitignore")
+        return
+
+    ui.info("已把 .va/ 加进 .gitignore（里面是会话记录）")
 
 
 def _staleness_note(meta, root: Path) -> str:

@@ -22,7 +22,7 @@ from ..util import truncate
 from .base import Tool, ToolError
 from .context import WorkspaceTool
 
-DESIGN_DIR = ".va/designs"
+from ..paths import describe, designs_dir
 MAX_SPEC_CHARS = 20_000
 
 DESIGN_PROMPT = """你在把一张 UI 设计稿翻译成**可以直接照着写代码的文字规格**。
@@ -81,7 +81,10 @@ class ReadDesign(WorkspaceTool):
             },
             "save": {
                 "type": "string",
-                "description": f"规格保存路径（默认 {DESIGN_DIR}/<图片名>.md；传空字符串则不保存）",
+                "description": (
+                    "规格保存路径（默认存到 agent 自己的目录下，名字取图片名；"
+                    "传空字符串则不保存）"
+                ),
             },
         },
         "required": ["image"],
@@ -178,7 +181,9 @@ class ReadDesign(WorkspaceTool):
         if save and save.strip():
             target = self.workspace.resolve(save.strip())
         else:
-            target = self.workspace.resolve(f"{DESIGN_DIR}/{image_path.stem}.md")
+            target = self.workspace.resolve_output(
+                designs_dir() / f"{image_path.stem}.md"
+            )
 
         body = (
             f"<!-- 由 read_design 生成，来源：{self.rel(image_path)}"

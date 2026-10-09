@@ -77,10 +77,11 @@ class TestPureLogic(AgentTestCase):
         with self.assertRaises(ToolError):
             RenderPage(self.workspace, self.cfg)._to_url("   ")
 
-    def test_output_path_defaults_under_va(self):
+    def test_output_path_goes_to_the_agent_home(self):
+        """截图落在 agent 自己的目录，不进用户的项目。"""
         tool = RenderPage(self.workspace, self.cfg)
         path = tool._output_path(None, "http://localhost:3000/dashboard")
-        self.assertIn(".va/screenshots", path.as_posix())
+        self.assertTrue(self.workspace.writable_output(path), path)
         self.assertTrue(path.name.endswith(".png"))
 
     def test_output_path_explicit_is_respected(self):
@@ -210,11 +211,19 @@ class TestRealRendering(AgentTestCase):
         message = str(ctx.exception)
         self.assertIn("失败", message)
 
-    def test_default_output_goes_to_screenshot_dir(self):
+    def test_default_output_does_not_touch_the_project(self):
+        """截图落在 agent 自己的目录，用户的项目保持干净。"""
+        from va.paths import screenshots_dir
+
         tool = RenderPage(self.workspace, self.cfg)
         tool.run("page.html", width=300, height=200)
-        created = list((self.root / ".va" / "screenshots").glob("*.png"))
+
+        created = list(screenshots_dir().glob("*.png"))
         self.assertTrue(created, "默认截图目录里没有文件")
+        self.assertFalse(
+            (self.root / ".va").exists(),
+            "截图不该写进用户项目——git status 会一直脏着",
+        )
 
 
 @unittest.skipUnless(HAS_PILLOW, "需要 Pillow：pip install pillow")

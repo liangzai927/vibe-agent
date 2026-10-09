@@ -253,9 +253,18 @@ class WebApp:
         except Exception:  # noqa: BLE001 - 量不出尺寸不影响上传
             size = None
 
+        # 产物在 agent 自己的目录下（不在用户项目里），所以「相对路径」
+        # 其实是给界面显示的路径：工作区内给相对路径，否则给 ~/.vibe-agent/…
+        if self.workspace.contains(target):
+            shown = self.workspace.relative(target)
+        else:
+            from ..paths import describe
+
+            shown = describe(target)
+
         return {
             "path": str(target),
-            "relative": self.workspace.relative(target),
+            "relative": shown,
             "bytes": len(payload),
             "size": list(size) if size else None,
         }
@@ -334,11 +343,17 @@ class Handler(BaseHTTPRequestHandler):
             from ..workspace import WorkspaceError
 
             try:
-                # 注意是 Workspace.resolve（没有 what 参数），不是
-                # WorkspaceTool.resolve。走它天然被沙箱约束住，
-                # 不会因为一个 ../ 就把工作区外的文件读出去。
-                target = self.app.workspace.resolve(rel, must_exist=True)
+                target = self.app.workspace.resolve_readable(rel, must_exist=True)
             except (WorkspaceError, OSError):
+                self.send_error(404, "not found")
+                return
+            # 只允许工作区和 agent 自己的目录。resolve_readable 本身不设限
+            # （它服务于「用户指着任意路径的图」），这里必须自己收回来——
+            # 否则一个 ../ 就能把整个文件系统读出去。
+            if not (
+                self.app.workspace.contains(target)
+                or self.app.workspace.writable_output(target)
+            ):
                 self.send_error(404, "not found")
                 return
             if not target.is_file():

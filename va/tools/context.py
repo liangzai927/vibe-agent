@@ -178,4 +178,14 @@ class WorkspaceTool(Tool):
         return self.workspace.resolve(path) if path else self.workspace.resolve(default)
 
     def rel(self, path: Path) -> str:
-        return self.workspace.relative(path)
+        """给人看的路径。
+
+        工作区内的用相对路径（``src/a.py``），agent 自己目录下的显示成
+        ``~/.vibe-agent/...``——把一长串绝对路径糊到界面上没有任何信息量。
+        """
+        path = Path(path)
+        if self.workspace.contains(path):
+            return self.workspace.relative(path)
+        from ..paths import describe
+
+        return describe(path)

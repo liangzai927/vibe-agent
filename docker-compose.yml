@@ -66,6 +66,8 @@ x-common: &common
     - VA_VISION_MODEL
     # 容器里的路径和宿主机不同，列之前先想清楚挂载点
     - VA_READ_DIRS
+    # VA_HOME 也不透传：镜像已经 ENV 设成 /home/va（正好落在 va-home
+    # 卷上，重启不丢）。写裸 key 会把它删掉，agent 的产物就跑到别处去了。
     # ---- 渲染 ----
     - VA_BROWSER_CHANNEL
     - VA_BROWSER_EXECUTABLE

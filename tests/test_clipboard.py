@@ -435,12 +435,17 @@ class TestPaths(unittest.TestCase):
     def test_prefix_is_configurable(self):
         self.assertTrue(default_filename("设计稿").startswith("设计稿-"))
 
-    def test_inbox_lives_under_va(self):
-        """放在 .va/ 下——它本来就被建议加进 .gitignore，而且临时素材
-        不该混进业务代码目录。"""
+    def test_inbox_is_outside_the_project(self):
+        """粘贴/拖拽进来的图片放在 agent 自己的目录下，不在用户项目里。
+
+        放在项目里的话，git status 会一直脏着，用户还得自己去加 .gitignore。
+        """
+        from va.paths import agent_home
+
         path = inbox_dir("/some/project")
-        self.assertEqual(path.parts[-2:], (".va", "inbox"))
-        self.assertEqual(str(path), "/some/project/.va/inbox")
+        self.assertEqual(path.parts[-1], "inbox")
+        self.assertEqual(path.parent, agent_home(), "不该落在工作区里")
+        self.assertNotIn("/some/project", str(path))
 
     def test_two_calls_in_the_same_second_do_not_clash_by_default(self):
         """同一秒内连按两次会撞名，但 /paste 支持给名字，不强行造唯一名。"""
