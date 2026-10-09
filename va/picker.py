@@ -13,7 +13,9 @@ Windows 上用 ``msvcrt.getch()``。两边都得保证**退出时把终端还原
 
 from __future__ import annotations
 
+import io
 import os
+import select as _select  # 本模块有个函数也叫 select，必须用别名
 import sys
 from typing import Callable, Iterable, Sequence
 
@@ -35,35 +37,60 @@ MAX_VISIBLE = 14  # 模型列表可能很长，一屏放不下就开窗口滚动
 
 
 class RawKeys:
-    """把终端切到原始模式，逐个读取按键并规范化。"""
+    """把终端切到原始模式，逐个读取按键并规范化。
+
+    **一切都走文件描述符（``os.read`` + ``select``），不碰 ``sys.stdin``。**
+
+    这一点是踩过坑的：``sys.stdin`` 是带缓冲的 ``TextIOWrapper``。
+    对它调 ``read(1)`` 会把 ``\x1b[B`` 三个字节**一起吞进 Python 层缓冲区**，
+    之后 ``select`` 去查 OS 层的 fd 自然什么都查不到——于是每次按方向键
+    都被判成超时。真终端里的表现就是「按了没反应，然后冒出一串 ^[[B」。
+    注入按键的测试全绿而真终端全废，正是因为测试绕过了真实 IO。
+    """
 
     def __init__(self, stream=None) -> None:
         self.stream = stream or sys.stdin
+        self.fd: int | None = None
         self._saved = None
 
     def __enter__(self) -> "RawKeys":
         try:
+            fd = self.stream.fileno()
+        except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+            fd = None
+        # mock 对象之类会返回非整数，那就退回按流读取（测试场景）
+        self.fd = fd if isinstance(fd, int) else None
+
+        if self.fd is None:
+            return self
+
+        try:
             import termios
             import tty
-        except ImportError:
-            return self
-        try:
-            self._saved = termios.tcgetattr(self.stream.fileno())
-            tty.setraw(self.stream.fileno())
-        except (termios.error, OSError, ValueError):
-            self._saved = None  # 不是真终端，读的时候会走别的分支
+
+            self._saved = termios.tcgetattr(self.fd)
+            # 用 TCSANOW 而不是默认的 TCSAFLUSH：后者会丢掉还没读的输入，
+            # 手快连按两下方向键时第二下就没了。
+            tty.setraw(self.fd, termios.TCSANOW)
+        except Exception:  # noqa: BLE001 - 不是终端（管道、重定向）就算了
+            self._saved = None
         return self
 
     def __exit__(self, *exc) -> None:
-        # 一定要还原。留在原始模式下的终端，用户敲什么都看不见。
-        if self._saved is None:
+        # 一定要还原。留在原始模式下的终端，用户敲什么都看不见——
+        # 这比「选不了模型」严重得多。
+        if self._saved is None or self.fd is None:
             return
         try:
             import termios
 
-            termios.tcsetattr(self.stream.fileno(), termios.TCSADRAIN, self._saved)
-        except Exception:  # noqa: BLE001 - 还原失败也不该把异常盖过原来的
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self._saved)
+        except Exception:  # noqa: BLE001 - 还原失败也不该盖过原来的异常
             pass
+        finally:
+            self._saved = None
+
+    # ------------------------------------------------------------- 读取
 
     def read(self) -> str:
         char = self._read_char()
@@ -77,43 +104,48 @@ class RawKeys:
             return self._read_escape()
         return char
 
-    # ------------------------------------------------------------- 内部
-
     def _read_char(self) -> str | None:
+        if self.fd is not None:
+            try:
+                data = os.read(self.fd, 1)
+            except (OSError, ValueError):
+                return None
+            return data.decode("utf-8", "replace") if data else None
+
         if os.name == "nt":
             import msvcrt
 
             return msvcrt.getch().decode("utf-8", "ignore")
+
         try:
-            data = self.stream.read(1)
-        except (OSError, ValueError):
+            text = self.stream.read(1)
+        except (OSError, ValueError, io.UnsupportedOperation):
             return None
-        return data or None
+        return text or None
+
+    def _ready(self, timeout: float) -> bool:
+        """fd 上有没有后续字节。没有探测手段时就当有。"""
+        if self.fd is None:
+            return True
+        try:
+            ready, _, _ = _select.select([self.fd], [], [], timeout)
+        except (OSError, ValueError):
+            return True
+        return bool(ready)
 
     def _read_escape(self) -> str:
-        """ESC 可能是「取消」，也可能是方向键的前缀。"""
-        if os.name == "nt":
-            import msvcrt
+        """ESC 既可能是「取消」也可能是方向键前缀——只能靠「后面还有没有字节」区分。
 
-            if not msvcrt.kbhit():
-                return CANCEL
-            second = msvcrt.getch().decode("utf-8", "ignore")
-            if second not in ("[", "\xe0"):
-                return CANCEL
-            third = msvcrt.getch().decode("utf-8", "ignore")
-            return {"H": UP, "P": DOWN, "G": HOME, "O": END}.get(third, OTHER)
-
-        # 读 [ A/B/C/D。用 select 判超时——单独的 ESC 后面不会跟着东西。
-        import select
-
-        ready, _, _ = select.select([self.stream], [], [], 0.05)
-        if not ready:
+        不判这个超时，单独的 ESC 会一直等第二个字节，表现成「按了没反应」。
+        """
+        if not self._ready(0.05):
             return CANCEL
-        second = self.stream.read(1)
-        if second != "[":
+
+        second = self._read_char()
+        if second not in ("[", "\xe0"):
             return CANCEL
-        third = self.stream.read(1)
-        return {"A": UP, "B": DOWN, "H": HOME, "F": END}.get(third, OTHER)
+        third = self._read_char()
+        return {"A": UP, "B": DOWN, "H": HOME, "F": END}.get(third or "", OTHER)
 
 
 def stdin_supports_arrow_keys() -> bool:
@@ -126,22 +158,27 @@ def stdin_supports_arrow_keys() -> bool:
 # --------------------------------------------------------------------- 选择
 
 
-def _format(labels: Sequence[str], index: int, window_start: int) -> list[str]:
-    """把当前要显示的那一段渲染成一行行文本。"""
-    lines: list[str] = []
-    for offset in range(min(MAX_VISIBLE, len(labels) - window_start)):
-        position = window_start + offset
-        selected = position == index
-        marker = cyan(" ❯ ") if selected else dim("   ")
+def _frame_lines(labels: Sequence[str], index: int, total: int) -> list[str]:
+    """渲染一帧。
+
+    **行数恒定**（可见项 + 上下两条滚动提示），这一点很关键：
+    重画靠的是「光标上移 N 行」，N 一旦和上一帧对不上就会越画越歪，
+    用户看到的就是列表错位。所以提示行即使没内容也占一行，用空串占位。
+    """
+    visible = min(MAX_VISIBLE, total)
+    start = _window_start(index, total)
+    above = start
+    below = total - (start + visible)
+
+    lines = [dim(f"     …… 上面还有 {above} 个") if above else ""]
+    for offset in range(visible):
+        position = start + offset
         text = labels[position]
-        if selected:
-            text = bold(cyan(text))
-        lines.append(f"  {marker}{text}")
-    if window_start > 0:
-        lines.insert(0, dim(f"     …… 上面还有 {window_start} 个"))
-    remaining = len(labels) - (window_start + MAX_VISIBLE)
-    if remaining > 0:
-        lines.append(dim(f"     …… 下面还有 {remaining} 个"))
+        if position == index:
+            lines.append("  " + cyan(" ❯ ") + bold(text))
+        else:
+            lines.append("     " + text)
+    lines.append(dim(f"     …… 下面还有 {below} 个") if below else "")
     return lines
 
 
@@ -191,18 +228,18 @@ def select(
 
     out(f"\n  {bold(title)}\n")
     out(dim(f"  {hint}\n\n"))
+    out("\x1b[?25l")  # 藏起光标，免得它跟着重画乱跳
 
     emitted = 0
     try:
         while True:
-            start = _window_start(index, len(options))
-            lines = _format(options, index, start)
+            lines = _frame_lines(options, index, len(options))
 
             if emitted:
-                # 光标上移回去，逐行覆盖。比清屏闪烁小得多。
-                out(f"\x1b[{emitted}A")
+                # F = 上移 N 行并回到行首；A 只上移，容易残留缩进
+                out(f"\x1b[{emitted}F")
             for line in lines:
-                out("\x1b[2K" + line + "\n")
+                out("\x1b[2K" + line + "\r\n")
             do_flush()
             emitted = len(lines)
 
@@ -216,16 +253,18 @@ def select(
             elif key == END:
                 index = len(options) - 1
             elif key == ENTER:
-                out("\n")
+                out("\r\n")
                 do_flush()
                 return index
             elif key == CANCEL:
-                out("\n")
-                out(dim("  已取消\n\n"))
+                out("\r\n")
+                out(dim("  已取消\r\n\r\n"))
                 do_flush()
                 return None
             # 其他键忽略，等着
     finally:
+        out("\x1b[?25h")  # 无论怎么退出都要把光标还回去
+        do_flush()
         if context is not None:
             context.__exit__(None, None, None)
 

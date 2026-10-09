@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -381,6 +383,216 @@ class TestRawKeys(unittest.TestCase):
             self.assertEqual(picker.RawKeys(stream=stream).read(), ENTER)
 
 
+class TestRawKeysOverARealFd(unittest.TestCase):
+    """用**真的文件描述符**测按键读取。
+
+    这一组是补出来的，因为原来那些用 mock 流的测试**全都漏掉了真正的 bug**：
+    `sys.stdin` 是带缓冲的 TextIOWrapper，对它 read(1) 会把 `\x1b[B` 三个字节
+    一起吞进 Python 层缓冲区，之后 select 去查 OS 层的 fd 什么都查不到——
+    真终端里表现为「按方向键没反应，然后冒出一串 ^[[B」。
+
+    mock 的 read() 不经过任何缓冲，所以永远测不出这件事。管道有真 fd，
+    能走完整的 os.read + select 路径。
+    """
+
+    def setUp(self) -> None:
+        self._fds: list[int] = []
+
+    def tearDown(self) -> None:
+        for fd in self._fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def make(self):
+        read_fd, write_fd = os.pipe()
+        self._fds += [read_fd, write_fd]
+        stream = os.fdopen(read_fd, "rb", buffering=0)
+        self._fds.remove(read_fd)  # 交给 stream 管
+        return picker.RawKeys(stream=stream), write_fd
+
+    def feed(self, write_fd: int, payload: bytes, delay: float = 0.06) -> None:
+        def writer():
+            time.sleep(0.05)
+            for index in range(0, len(payload)):
+                os.write(write_fd, payload[index : index + 1])
+                time.sleep(0.03)
+
+        threading.Thread(target=writer, daemon=True).start()
+
+    def test_binds_to_the_fd_not_the_stream(self):
+        keys, _ = self.make()
+        with keys:
+            self.assertIsInstance(keys.fd, int, "必须拿到真 fd，否则会退回带缓冲的流读取")
+
+    def test_arrow_keys_are_read_as_single_events(self):
+        """三个字节必须被当成一个方向键，而不是三次独立读取。"""
+        keys, write_fd = self.make()
+        self.feed(write_fd, b"\x1b[B")
+        with keys:
+            self.assertEqual(keys.read(), DOWN)
+
+    def test_consecutive_arrows_do_not_get_lost(self):
+        """手快连按两下，第二下不能被 TCSAFLUSH 之类的设置吃掉。"""
+        keys, write_fd = self.make()
+        self.feed(write_fd, b"\x1b[B\x1b[B\x1b[A\r")
+        with keys:
+            got = [keys.read() for _ in range(4)]
+        self.assertEqual(got, [DOWN, DOWN, UP, ENTER])
+
+    def test_lone_escape_still_cancels(self):
+        keys, write_fd = self.make()
+        self.feed(write_fd, b"\x1b")
+        with keys:
+            self.assertEqual(keys.read(), CANCEL)
+
+    def test_eof_is_cancel(self):
+        read_fd, write_fd = os.pipe()
+        self._fds += [read_fd, write_fd]
+        stream = os.fdopen(read_fd, "rb", buffering=0)
+        self._fds.remove(read_fd)
+        os.close(write_fd)
+        self._fds.remove(write_fd)
+        self.assertEqual(picker.RawKeys(stream=stream).read(), CANCEL)
+
+    def test_raw_mode_is_left_off_on_a_pipe(self):
+        """管道不是终端，切不了原始模式——但不能因此崩掉。"""
+        keys, _ = self.make()
+        with keys:
+            pass
+        self.assertIsNone(keys._saved)
+
+    def test_end_to_end_selection_over_a_pipe(self):
+        """整条链路：注入 fd 上的真实按键，走完整个选择流程。"""
+        read_fd, write_fd = os.pipe()
+        self._fds += [read_fd, write_fd]
+        stream = os.fdopen(read_fd, "rb", buffering=0)
+        self._fds.remove(read_fd)
+
+        keys = picker.RawKeys(stream=stream)
+        self.feed(write_fd, b"\x1b[B\x1b[B\r")
+        with keys:
+            frames: list[str] = []
+            result = select(
+                "选择模型", ["a", "b", "c"],
+                keys=keys.read, write=frames.append, flush=lambda: None,
+            )
+        self.assertEqual(result, 2, "按下下回车应该选中第三项")
+
+
+class TestFrameHeight(unittest.TestCase):
+    """帧高度必须恒定。
+
+    重画靠「光标上移 N 行」，N 和上一帧对不上就会越画越歪——
+    用户看到的就是列表错位。
+    """
+
+    def test_height_is_constant_regardless_of_position(self):
+        for total in (1, 2, 3, picker.MAX_VISIBLE, picker.MAX_VISIBLE + 1, 60):
+            labels = [f"m{i}" for i in range(total)]
+            heights = {len(picker._frame_lines(labels, i, total)) for i in range(total)}
+            self.assertEqual(
+                len(heights), 1, f"{total} 项时帧高会变：{heights}——重画必然错位"
+            )
+
+    def test_height_is_the_same_when_scrolling_starts(self):
+        small = [f"m{i}" for i in range(picker.MAX_VISIBLE)]
+        big = [f"m{i}" for i in range(picker.MAX_VISIBLE + 5)]
+        self.assertEqual(
+            len(picker._frame_lines(small, 0, len(small))),
+            len(picker._frame_lines(big, 0, len(big))),
+            "刚好装得下和需要滚动时，帧高应该一致",
+        )
+
+    def test_scroll_hints_occupy_a_line_even_when_empty(self):
+        labels = ["a", "b"]
+        lines = picker._frame_lines(labels, 0, 2)
+        self.assertEqual(len(lines), 4, "2 项 + 上下提示行 = 4 行")
+
+    def test_selection_is_always_visible(self):
+        labels = [f"m{i:02d}" for i in range(40)]
+        for index in (0, 5, 20, 39):
+            text = ANSI.sub("", "\n".join(picker._frame_lines(labels, index, 40)))
+            self.assertIn(f"m{index:02d}", text)
+
+
+class TestCursorHandling(unittest.TestCase):
+    def test_cursor_is_hidden_and_restored(self):
+        frames: list[str] = []
+        select(
+            "t", ["a", "b"], keys=keys_for(DOWN, ENTER),
+            write=frames.append, flush=lambda: None,
+        )
+        raw = "".join(frames)
+        self.assertIn("\x1b[?25l", raw, "重画时要藏起光标")
+        self.assertIn("\x1b[?25h", raw, "退出时必须把光标还回去")
+
+    def test_cursor_restored_even_on_cancel(self):
+        frames: list[str] = []
+        select(
+            "t", ["a"], keys=keys_for(CANCEL),
+            write=frames.append, flush=lambda: None,
+        )
+        self.assertIn("\x1b[?25h", "".join(frames))
+
+    def test_cursor_restored_when_the_key_reader_blows_up(self):
+        """读按键时抛异常也必须还原光标和终端。"""
+        frames: list[str] = []
+        with self.assertRaises(RuntimeError):
+            select(
+                "t", ["a"], keys=lambda: (_ for _ in ()).throw(RuntimeError("炸")),
+                write=frames.append, flush=lambda: None,
+            )
+        self.assertIn("\x1b[?25h", "".join(frames))
+
+    def test_uses_cursor_previous_line_not_just_up(self):
+        """F 会同时回到行首，A 不会——用 A 容易残留缩进。"""
+        frames: list[str] = []
+        select(
+            "t", ["a", "b"], keys=keys_for(DOWN, ENTER),
+            write=frames.append, flush=lambda: None,
+        )
+        self.assertIn("F", "".join(frames))
+
+
+class TestNoNameCollisions(unittest.TestCase):
+    """模块里的函数名不能撞上它导入的模块名。
+
+    `def select(...)` 一度遮蔽了 `select` 模块，于是 `select.select(...)`
+    变成「对函数取属性」，方向键直接报废。
+    """
+
+    def test_select_module_is_aliased(self):
+        import types
+
+        import va.picker as module
+
+        self.assertIsInstance(
+            module._select, types.ModuleType, "select 模块必须以别名导入"
+        )
+        self.assertTrue(callable(module._select.select))
+
+    def test_imported_modules_are_not_shadowed(self):
+        """模块里定义同名函数会遮蔽导入的模块。
+
+        `def select(...)` 一度遮蔽了 `select` 模块，于是 `select.select(...)`
+        变成「对函数取属性」——方向键直接报废，而报错信息完全指不到点上。
+        """
+        import types
+
+        import va.picker as module
+
+        # 只查这个模块真正用到的。多写一个不存在的名字只会制造假失败。
+        for name in ("io", "os", "sys"):
+            obj = getattr(module, name, None)
+            self.assertIsNotNone(obj, f"va.picker 没有导入 {name}")
+            self.assertIsInstance(
+                obj, types.ModuleType,
+                f"va.picker.{name} 被别的东西占了——模块内所有 {name}.* 引用都会失效",
+            )
+
+
 class TestTestCaseHygiene(unittest.TestCase):
     """测试类里不能有名字撞上 TestCase 自身的方法。
 
@@ -389,11 +601,10 @@ class TestTestCaseHygiene(unittest.TestCase):
     完全看不出是自己的问题。
     """
 
-    RESERVED = {
-        "run", "setUp", "tearDown", "setUpClass", "tearDownClass",
-        "setUpModule", "tearDownModule", "skipTest", "subTest", "addCleanup",
-        "assertEqual", "assertTrue", "assertFalse", "assertIn", "assertRaises",
-    }
+    # 只禁那些**不该被覆盖**的：run 是 unittest 执行测试的入口，
+    # assert* 是它用来断言的。setUp / tearDown / skipTest 本来就允许覆盖，
+    # 把它们也算进来只会制造误报。
+    RESERVED = {"run"}
 
     def test_no_helper_shadows_testcase_methods(self):
         import tests.test_picker as module
@@ -404,7 +615,9 @@ class TestTestCaseHygiene(unittest.TestCase):
             if not (isinstance(obj, type) and issubclass(obj, unittest.TestCase)):
                 continue
             for attr in vars(obj):
-                if attr in self.RESERVED:
+                if attr in self.RESERVED or (
+                    attr.startswith("assert") and callable(getattr(obj, attr, None))
+                ):
                     offenders.append(f"{name}.{attr}")
         self.assertEqual(offenders, [], f"这些方法名会覆盖 TestCase 自身：{offenders}")
 
