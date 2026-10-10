@@ -40,7 +40,30 @@ class EventBus:
         self._events: list[dict] = []
         self._limit = limit
         self._seq = 0
+        self._subscribers = 0
         self._cv = threading.Condition()
+
+    # ------------------------------------------------------------- 订阅
+
+    def subscribe(self) -> int:
+        with self._cv:
+            self._subscribers += 1
+            return self._subscribers
+
+    def unsubscribe(self) -> int:
+        """返回还剩几个订阅者。
+
+        归零意味着**没有人能看到审批提示了**——这时候还让 worker 干等，
+        就变成永远卡住：界面显示「运行中」，发什么都被拒。
+        """
+        with self._cv:
+            self._subscribers = max(0, self._subscribers - 1)
+            return self._subscribers
+
+    @property
+    def subscribers(self) -> int:
+        with self._cv:
+            return self._subscribers
 
     @property
     def seq(self) -> int:
@@ -118,6 +141,19 @@ class ApprovalGate:
     def waiting(self) -> int:
         with self._lock:
             return len(self._waiters)
+
+    def cancel_all(self, answer: str = "no") -> int:
+        """把所有等待中的审批一次性解掉。返回解掉了几个。
+
+        浏览器关掉之后没人能点按钮了，再等下去就是白等。
+        """
+        with self._lock:
+            count = 0
+            for request_id, waiter in list(self._waiters.items()):
+                self._pending[request_id] = answer
+                waiter.set()
+                count += 1
+            return count
 
 
 class WebUI(UI):

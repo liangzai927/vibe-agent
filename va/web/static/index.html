@@ -747,7 +747,15 @@ async function loadModels() {
       select.appendChild(option);
     }
   } catch (err) {
+    // 别只丢一个空下拉框——那看起来像「没有模型可用」，
+    // 实际是「接口挂了」，两件事的排查方向完全不同。
+    select.innerHTML = "";
+    const option = document.createElement("option");
+    option.textContent = "（读取模型列表失败，见下方提示）";
+    option.value = "";
+    select.appendChild(option);
     select.disabled = true;
+    pushNote("error", "读取模型列表失败：" + err);
   }
 }
 
@@ -772,11 +780,29 @@ $("model").addEventListener("change", async (e) => {
   }
 });
 
+let busySince = 0;
+let busyTimer = null;
+
 function setStatus(busy) {
   const el = $("status");
-  el.textContent = busy ? "运行中…" : "空闲";
   el.className = "pill " + (busy ? "busy" : "ready");
   $("send").disabled = busy;
+
+  if (busy) {
+    if (!busySince) busySince = Date.now();
+    const tick = () => {
+      const seconds = Math.floor((Date.now() - busySince) / 1000);
+      const shown = seconds < 60 ? seconds + "s" : Math.floor(seconds / 60) + "m" + (seconds % 60) + "s";
+      // 带上时长，才分得清「在干活」和「卡住了」
+      el.textContent = `运行中 ${shown}`;
+    };
+    tick();
+    if (!busyTimer) busyTimer = setInterval(tick, 1000);
+  } else {
+    busySince = 0;
+    if (busyTimer) { clearInterval(busyTimer); busyTimer = null; }
+    el.textContent = "空闲";
+  }
 }
 
 function connect() {

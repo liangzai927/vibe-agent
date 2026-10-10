@@ -571,9 +571,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
+        self.app.bus.subscribe()
         try:
+            # 超时也是「多久发现浏览器没了」的上限：断开只有在下次写入时
+            # 才会暴露。5 秒对本地服务来说代价可以忽略，但断线感知快得多——
+            # 这直接决定了「关掉标签页后 agent 还要空转多久」。
             while True:
-                events = self.app.bus.wait(since, timeout=15)
+                events = self.app.bus.wait(since, timeout=5)
                 if not events:
                     # 心跳。没有它，中间的代理或浏览器会以为连接死了。
                     self.wfile.write(b": ping\n\n")
@@ -586,6 +590,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             return  # 浏览器关了标签页，正常
+        finally:
+            # 最后一个人走了：把还挂着的审批按拒绝处理。
+            # 不这么做的话 worker 会干等到超时，界面上表现为
+            # 「一直显示运行中，发什么都说上一个任务还在跑」。
+            if self.app.bus.unsubscribe() == 0:
+                cancelled = self.app.gate.cancel_all("no")
+                if cancelled:
+                    self.app.bus.publish(
+                        "note",
+                        level="warn",
+                        text=f"浏览器断开了，{cancelled} 个待审批已按拒绝处理",
+                    )
 
     # ----------------------------------------------------------- POST
 

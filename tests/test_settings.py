@@ -317,6 +317,47 @@ class TestSessionSync(AgentTestCase):
 # --------------------------------------------------------------- 配置文件
 
 
+class TestSessionDirFailure(AgentTestCase):
+    """会话目录建不出来时，agent 必须还能干活。
+
+    记录存不下是「少了个功能」，不是「没法干活」。为了它把整个服务弄崩，
+    等于用一个小问题换掉一个大功能——用户报的正是这个：
+    `va web` 直接起不来，页面上什么都点不动。
+    """
+
+    def test_create_raises_a_dedicated_error(self):
+        from va.session import SessionDirError
+
+        blocked = self.root / "blocked"
+        blocked.mkdir()
+        blocked.chmod(0o500)
+        try:
+            with self.assertRaises(SessionDirError) as ctx:
+                SessionStore.create(self.root, "m", session_dir=blocked / "sub" / "deep")
+            message = str(ctx.exception)
+            self.assertIn("VA_SESSION_DIR", message, "要告诉用户怎么改")
+        finally:
+            blocked.chmod(0o700)
+
+    def test_helper_degrades_instead_of_raising(self):
+        from va.cli import _create_session
+        from va.ui import UI
+
+        blocked = self.root / "blocked2"
+        blocked.mkdir()
+        blocked.chmod(0o500)
+        os.environ["VA_SESSION_DIR"] = str(blocked / "sub" / "deep")
+        self.addCleanup(os.environ.pop, "VA_SESSION_DIR", None)
+        try:
+            ui = UI(self.workspace)
+            with mock.patch.object(ui, "warn") as warned:
+                store = _create_session(self.root, self.cfg, ui)
+            self.assertIsNone(store, "应该降级成「不记录」而不是抛异常")
+            self.assertTrue(warned.called, "降级必须说出来，不能悄悄吞掉")
+        finally:
+            blocked.chmod(0o700)
+
+
 class TestEnvFileOverride(AgentTestCase):
     """VA_ENV_FILE：配置文件的位置必须能被指到别处。
 

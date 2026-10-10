@@ -26,6 +26,14 @@ SESSION_DIR_NAME = Path(".va") / "sessions"
 FILE_MODE = 0o600
 
 
+class SessionDirError(Exception):
+    """会话目录建不出来或写不进去。
+
+    单独一个类型，因为调用方需要区分「记录存不下」和「别的错」——
+    前者不该让整个 agent 挂掉，降级成不记录也要能干活。
+    """
+
+
 @dataclass
 class SessionMeta:
     id: str
@@ -153,7 +161,13 @@ class SessionStore:
         session_dir: Path | None = None,
     ) -> "SessionStore":
         directory = Path(session_dir) if session_dir else cls.default_dir(workspace)
-        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SessionDirError(
+                f"建不出会话目录 {directory}：{exc}\n"
+                f"（可以用 VA_SESSION_DIR 换个位置，或者直接设成空字符串停用记录）"
+            ) from exc
         session_id = time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
         meta = SessionMeta(
             id=session_id,

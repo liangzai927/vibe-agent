@@ -875,6 +875,116 @@ class TestSettings(AgentTestCase):
         self.assertIn("auto_approve", events[0]["changed"])
 
 
+class TestSubscriberTracking(AgentTestCase):
+    """事件总线的订阅计数。
+
+    它是「浏览器还在不在」的判据——归零意味着审批提示没人看得到，
+    这时候还让 worker 干等就是永远卡住。
+    """
+
+    def test_counts_up_and_down(self):
+        bus = EventBus()
+        self.assertEqual(bus.subscribers, 0)
+        self.assertEqual(bus.subscribe(), 1)
+        self.assertEqual(bus.subscribe(), 2)
+        self.assertEqual(bus.unsubscribe(), 1)
+        self.assertEqual(bus.unsubscribe(), 0)
+
+    def test_never_goes_negative(self):
+        bus = EventBus()
+        self.assertEqual(bus.unsubscribe(), 0)
+        self.assertEqual(bus.unsubscribe(), 0)
+
+
+class TestApprovalCancellation(AgentTestCase):
+    """浏览器断开时，挂着的审批必须被解掉。
+
+    不解的话 worker 会干等到 30 分钟超时，界面上表现为「一直显示运行中，
+    发什么都说上一个任务还在跑」——这正是用户报的现象。
+    """
+
+    def test_cancel_all_unblocks_every_waiter(self):
+        gate = ApprovalGate(timeout=30)
+        results: list[str] = []
+
+        def worker():
+            results.append(gate.request(lambda rid: None)[1])
+
+        threads = [threading.Thread(target=worker, daemon=True) for _ in range(3)]
+        for t in threads:
+            t.start()
+        time.sleep(0.3)
+        self.assertEqual(gate.waiting, 3)
+
+        self.assertEqual(gate.cancel_all("no"), 3)
+        for t in threads:
+            t.join(timeout=3)
+            self.assertFalse(t.is_alive(), "cancel_all 之后 worker 必须醒过来")
+        self.assertEqual(results, ["no", "no", "no"])
+        self.assertEqual(gate.waiting, 0)
+
+    def test_cancel_all_with_nothing_waiting(self):
+        self.assertEqual(ApprovalGate(timeout=5).cancel_all("no"), 0)
+
+    def test_cancel_uses_the_given_answer(self):
+        gate = ApprovalGate(timeout=30)
+        box: list[str] = []
+        threading.Thread(
+            target=lambda: box.append(gate.request(lambda rid: None)[1]), daemon=True
+        ).start()
+        time.sleep(0.2)
+        gate.cancel_all("timeout")
+        time.sleep(0.3)
+        self.assertEqual(box, ["timeout"])
+
+
+class TestSSEDisconnectCancelsApprovals(AgentTestCase):
+    """走真实 HTTP：最后一个 SSE 连接断开时，待审批要被解掉。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.app = WebApp(
+            self.cfg,
+            self.workspace,
+            llm=ScriptedLLM(turn("x")),
+            registry=build_registry(self.workspace),
+        )
+        self.server = ServerFixture(self.app)
+
+    def tearDown(self) -> None:
+        self.server.stop()
+        super().tearDown()
+
+    def test_disconnect_unblocks_a_waiting_approval(self):
+        # 手工占一个 SSE 连接
+        response = urllib.request.urlopen(
+            self.server.url + "/api/events?since=0", timeout=10
+        )
+        time.sleep(0.5)
+        self.assertEqual(self.app.bus.subscribers, 1)
+
+        # 造一个正在等待的审批
+        box: list[bool] = []
+        threading.Thread(
+            target=lambda: box.append(
+                self.app.ui.confirm("write_file", {"path": "a"}, "x")
+            ),
+            daemon=True,
+        ).start()
+        time.sleep(0.5)
+        self.assertEqual(self.app.gate.waiting, 1)
+
+        response.close()  # 浏览器关标签页
+        # 服务端要等下一次写（心跳超时）才会发现连接断了，所以这里得等
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and self.app.gate.waiting:
+            time.sleep(0.1)
+
+        self.assertEqual(self.app.gate.waiting, 0, "断开后不该还有挂着的审批")
+        time.sleep(0.3)
+        self.assertEqual(box, [False], "应该按拒绝处理")
+
+
 class TestSSE(AgentTestCase):
     def setUp(self) -> None:
         super().setUp()

@@ -16,7 +16,7 @@ from .llm import LLM
 from .loop import Agent
 from .plan import Plan
 from .prompts import build_system_prompt
-from .session import SessionStore, git_head
+from .session import SessionDirError, SessionStore, git_head
 from .tools import build_registry
 from .ui import UI
 from .util import bold, cyan, dim, green, red, yellow
@@ -254,12 +254,26 @@ def _open_session(
         if store is None:
             ui.warn("没有找到历史会话，已新建一个。")
             _warn_sessions_not_ignored(workspace, ui)
-            return SessionStore.create(root, cfg.model), [], "", None
+            return _create_session(root, cfg, ui), [], "", None
         meta, history, plan = store.load()
         return store, history, _staleness_note(meta, root), plan
 
     _warn_sessions_not_ignored(workspace, ui)
-    return SessionStore.create(root, cfg.model), [], "", None
+    return _create_session(root, cfg, ui), [], "", None
+
+
+def _create_session(root: Path, cfg: Config, ui: UI) -> SessionStore | None:
+    """建一个会话。**建不出来不该让 agent 起不来。**
+
+    记录存不下是「少了个功能」，不是「没法干活」——为了它把整个服务弄崩，
+    等于用一个小问题换掉一个大功能。降级成不记录，并说清楚原因和怎么改。
+    """
+    try:
+        return SessionStore.create(root, cfg.model)
+    except SessionDirError as exc:
+        ui.warn(str(exc))
+        ui.warn("本次不会被记录，其他功能照常。")
+        return None
 
 
 def _warn_sessions_not_ignored(workspace: Workspace, ui: UI) -> None:
