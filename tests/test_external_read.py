@@ -81,14 +81,19 @@ class TestWorkspaceReadable(AgentTestCase):
         self.assertTrue(ws.readable(self.root / "a.txt"))
         self.assertFalse(ws.needs_external_approval("./a.txt"))
 
-    def test_outside_is_readable_but_needs_approval(self):
-        ws = Workspace(self.root)
+    def test_outside_is_readable_but_needs_approval_under_listed(self):
+        """listed 策略下越界要问。
+
+        注意必须显式指定 read_scope——默认现在是 all（不问任何位置）。
+        不指定的话这个测试就变成在验另一件事了。
+        """
+        ws = Workspace(self.root, read_scope="listed")
         self.assertFalse(ws.readable(self.outside_file))
         self.assertTrue(ws.needs_external_approval(self.outside_file))
 
     def test_relative_escape_needs_approval(self):
         """`../x` 也是相对路径，但它能走出去——不能因为「相对」就放行。"""
-        ws = Workspace(self.root)
+        ws = Workspace(self.root, read_scope="listed")
         self.assertTrue(ws.needs_external_approval("../whatever.txt"))
         self.assertTrue(ws.needs_external_approval(f"../{self.outside.name}/secret.txt"))
 
@@ -184,16 +189,45 @@ class TestToolApproval(AgentTestCase):
                 f"{name} 读工作区内的文件不该问",
             )
 
-    def test_outside_needs_approval(self):
+    def test_outside_needs_approval_under_listed(self):
+        """listed 策略下越界要问（默认是 all，不问）。"""
+        from va.tools import build_registry
+        from va.tools.inspect import InspectImage
+
+        listed = Workspace(self.root, read_scope="listed")
         for name, key in (
             ("inspect_image", "path"),
             ("read_design", "image"),
             ("read_document", "path"),
         ):
+            tool = build_registry(listed, cfg=self.cfg).get(name)
             self.assertTrue(
-                self.approval(name, **{key: str(self.ext_png)}),
-                f"{name} 读工作区外的文件必须先问",
+                tool.needs_approval({key: str(self.ext_png)}),
+                f"{name} 在 listed 策略下读工作区外必须先问",
             )
+
+    def test_default_scope_does_not_ask(self):
+        """默认（all）下越界不问——这是用户明确要的。"""
+        for name, key in (
+            ("inspect_image", "path"),
+            ("read_design", "image"),
+            ("read_document", "path"),
+        ):
+            self.assertFalse(
+                self.approval(name, **{key: str(self.ext_png)}),
+                f"{name} 默认不该弹审批",
+            )
+
+    def test_workspace_scope_refuses_outside_reads(self):
+        """最严格的策略：不许越界，连审批机会都不给。"""
+        from va.tools import build_registry
+        from va.tools.base import ToolError
+
+        locked = Workspace(self.root, read_scope="workspace")
+        tool = build_registry(locked, cfg=self.cfg).get("inspect_image")
+        self.assertFalse(tool.needs_approval({"path": str(self.ext_png)}))
+        with self.assertRaises((ToolError, WorkspaceError)):
+            tool.run(path=str(self.ext_png))
 
     def test_writers_never_get_the_external_path(self):
         """写操作永远不能越界——这是整个沙箱的底线。"""
@@ -232,7 +266,10 @@ class TestToolApproval(AgentTestCase):
         self.assertFalse(tool.needs_approval({"path": str(self.ext_png)}))
 
     def test_external_preview_explains_how_to_stop_being_asked(self):
-        tool = self.registry.get("inspect_image")
+        from va.tools import build_registry
+
+        listed = Workspace(self.root, read_scope="listed")
+        tool = build_registry(listed, cfg=self.cfg).get("inspect_image")
         text = tool.preview({"path": str(self.ext_png)})
         self.assertIsNotNone(text)
         self.assertIn("VA_READ_DIRS", text, "要告诉用户怎么免掉这个询问")

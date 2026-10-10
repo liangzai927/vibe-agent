@@ -182,6 +182,26 @@
   .check input { margin-top: 3px; }
   .check .t { font-size: 13px; font-weight: 600; }
   .check .d { color: var(--muted); font-size: 12px; }
+  .radios { display: flex; flex-direction: column; gap: 7px; margin-bottom: 10px; }
+  .radios label { display: flex; align-items: flex-start; gap: 8px; font-weight: 400; cursor: pointer; }
+  .radios input { margin-top: 3px; }
+  .radios .t { font-size: 13px; }
+  .radios .d { color: var(--muted); font-size: 12px; display: block; margin-top: 1px; }
+  .pick-row { display: flex; gap: 8px; }
+  .pick-row input { flex: 1; }
+  .pick-row button { white-space: nowrap; }
+  .dir-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .dir-item {
+    display: flex; align-items: center; gap: 8px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px;
+    font-family: var(--mono); font-size: 12.5px;
+  }
+  .dir-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dir-item button { padding: 1px 7px; font-size: 12px; }
+  .dir-empty { color: var(--muted); font-size: 12px; padding: 4px 2px; }
+  .hint-inline { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .warn-inline { color: var(--yellow); font-size: 12px; margin-top: 6px; }
+
   .restart {
     color: var(--yellow); background: #d2992212; border: 1px solid #5c4a1a;
     border-radius: 6px; padding: 8px 11px; font-size: 12.5px; margin-top: 14px;
@@ -279,22 +299,82 @@
         <label>会话保存位置</label>
         <div class="desc">
           一个会话一个 <code>.jsonl</code>。放在项目里会一直弄脏 git status，
-          所以默认在项目外。想让记录进 git 或同步盘，指到那个目录就行。
+          所以默认在项目外。
         </div>
-        <input type="text" id="set-session-dir" placeholder="留空 = 用默认位置">
-        <div class="row-after">
-          <span>当前解析为 <code id="set-session-resolved"></code></span>
-          <button id="set-session-reset">恢复默认</button>
+        <div class="radios">
+          <label>
+            <input type="radio" name="sess-mode" value="local">
+            <span class="t">本地文件夹
+              <span class="d">存到这台机器的某个目录</span>
+            </span>
+          </label>
+          <label>
+            <input type="radio" name="sess-mode" value="remote">
+            <span class="t">Git 仓库
+              <span class="d">同步到远端，多台机器之间共享记录</span>
+            </span>
+          </label>
+        </div>
+
+        <div id="sess-local">
+          <div class="pick-row">
+            <input type="text" id="set-session-dir" placeholder="留空 = 用默认位置">
+            <button id="pick-session-dir">浏览…</button>
+          </div>
+          <div class="hint-inline">当前解析为 <code id="set-session-resolved"></code></div>
+        </div>
+
+        <div id="sess-remote" style="display:none">
+          <input type="text" id="set-session-remote"
+                 placeholder="git@github.com:you/va-sessions.git">
+          <div class="hint-inline">
+            填一个空仓库的地址（SSH 或 HTTPS 都行）。会话直接写进本地克隆，
+            点下面的「立即同步」才会推送——<strong>推送是外部可见的动作，不该自动做</strong>。
+          </div>
+          <div class="row-after" style="margin-top:8px">
+            <button id="btn-sync">立即同步</button>
+            <span id="sync-msg"></span>
+          </div>
         </div>
       </div>
 
       <div class="field">
-        <label>允许读取的工作区外目录</label>
+        <label>允许读取工作区外的文件</label>
         <div class="desc">
-          一行一个。列在这里的目录，读图片/文档时不再逐次询问。
-          <strong>改完要重启服务才生效。</strong>
+          设计稿和需求文档常常不在项目里。这条策略只管「读」——写操作永远锁在工作区内。
         </div>
-        <textarea id="set-read-dirs" placeholder="~/Desktop&#10;~/Downloads"></textarea>
+        <div class="radios">
+          <label>
+            <input type="radio" name="read-scope" value="all">
+            <span class="t">全部（默认）
+              <span class="d">任何位置的图片/文档都能读，不再询问</span>
+            </span>
+          </label>
+          <label>
+            <input type="radio" name="read-scope" value="listed">
+            <span class="t">只允许下面列出的目录
+              <span class="d">其余位置每次都要你点同意</span>
+            </span>
+          </label>
+          <label>
+            <input type="radio" name="read-scope" value="workspace">
+            <span class="t">只允许工作区内
+              <span class="d">最严格，但设计稿放在桌面就读不了</span>
+            </span>
+          </label>
+        </div>
+
+        <div id="scope-list">
+          <div class="dir-list" id="read-dir-list"></div>
+          <div class="pick-row">
+            <button id="pick-read-dir">＋ 选择文件夹…</button>
+            <button id="add-read-dir">手动输入</button>
+          </div>
+        </div>
+        <div class="warn-inline" id="scope-warn" style="display:none">
+          ⚠ 「全部」意味着 agent 可以读这台机器上任何位置的图片和文档，
+          <strong>不会再问</strong>。介意的话选「只允许下面列出的目录」。
+        </div>
       </div>
 
       <div class="field">
@@ -861,27 +941,101 @@ input.addEventListener("paste", (e) => {
 // ---------------------------------------------------------------- 设置
 
 let settingsCache = null;
+let readDirs = [];
+
+function setRadio(name, value) {
+  document.querySelectorAll(`input[name="${name}"]`).forEach((el) => {
+    el.checked = el.value === value;
+  });
+}
+function getRadio(name) {
+  const el = document.querySelector(`input[name="${name}"]:checked`);
+  return el ? el.value : "";
+}
+function syncVisibility() {
+  const remote = getRadio("sess-mode") === "remote";
+  $("sess-local").style.display = remote ? "none" : "block";
+  $("sess-remote").style.display = remote ? "block" : "none";
+
+  const scope = getRadio("read-scope");
+  $("scope-list").style.display = scope === "listed" ? "block" : "none";
+  $("scope-warn").style.display = scope === "all" ? "block" : "none";
+}
+
+function renderReadDirs() {
+  const box = $("read-dir-list");
+  box.innerHTML = "";
+  if (!readDirs.length) {
+    const empty = document.createElement("div");
+    empty.className = "dir-empty";
+    empty.textContent = "还没有添加目录";
+    box.appendChild(empty);
+    return;
+  }
+  readDirs.forEach((dir, index) => {
+    const row = document.createElement("div");
+    row.className = "dir-item";
+    const text = document.createElement("span");
+    text.textContent = dir;
+    text.title = dir;
+    const del = document.createElement("button");
+    del.textContent = "×";
+    del.title = "移除";
+    del.addEventListener("click", () => {
+      readDirs.splice(index, 1);
+      renderReadDirs();
+    });
+    row.appendChild(text);
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+
+// 让服务端弹系统原生的文件夹选择框——浏览器拿不到真实路径
+async function browseFolder(prompt) {
+  try {
+    const res = await fetch("/api/pick-folder?prompt=" + encodeURIComponent(prompt));
+    return await res.json();
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
 
 async function openSettings() {
   $("set-msg").textContent = "";
+  $("sync-msg").textContent = "";
   $("set-restart").style.display = "none";
   $("settings").classList.add("on");
   try {
     const data = await fetch("/api/settings").then((r) => r.json());
     settingsCache = data;
 
-    // 会话位置：默认位置不写进输入框（留空即默认），否则下次打开会以为是自定义的
-    const isDefault = data.session_dir_display === data.session_dir_default;
-    $("set-session-dir").value = isDefault ? "" : data.session_dir;
-    $("set-session-dir").placeholder = "留空 = " + data.session_dir_default;
-    $("set-session-resolved").textContent = data.session_dir_display;
+    const isRemote = !!data.session_remote;
+    setRadio("sess-mode", isRemote ? "remote" : "local");
+    $("set-session-remote").value = data.session_remote || "";
 
-    $("set-read-dirs").value = (data.read_dirs || []).join("\n");
+    const isDefault = data.session_dir_display === data.session_dir_default;
+    $("set-session-dir").value = isDefault || isRemote ? "" : data.session_dir;
+    $("set-session-dir").placeholder = "留空 = " + data.session_dir_default;
+    $("set-session-resolved").textContent = isRemote
+      ? "远端：" + data.session_dir_display
+      : data.session_dir_display;
+
+    readDirs = (data.read_dirs || []).slice();
+    renderReadDirs();
+    setRadio("read-scope", data.read_scope || "all");
+
     $("set-vision").value = data.vision_model || "";
     $("set-auto-approve").checked = !!data.auto_approve;
     $("set-thinking").checked = !!data.show_thinking;
     $("set-env-path").textContent = data.env_path;
 
+    if (!data.picker || !data.picker.available) {
+      ["pick-session-dir", "pick-read-dir"].forEach((id) => {
+        $(id).disabled = true;
+        $(id).title = (data.picker && data.picker.how) || "这台机器弹不出选择框";
+      });
+    }
     if (data.session_dir_is_legacy) {
       const box = $("set-restart");
       box.style.display = "block";
@@ -889,6 +1043,7 @@ async function openSettings() {
         "会话还在项目内的 <code>.va/sessions/</code>。改成上面的默认位置就会搬到项目外，" +
         "已有的记录不会自动搬走——想一起搬，用命令行 <code>mv</code> 一下。";
     }
+    syncVisibility();
   } catch (err) {
     $("set-msg").textContent = "读取设置失败：" + err;
   }
@@ -902,19 +1057,22 @@ async function saveSettings() {
   const button = $("settings-save");
   button.disabled = true;
   $("set-msg").textContent = "保存中…";
-
-  const readDirs = $("set-read-dirs").value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+  $("set-restart").style.display = "none";
 
   const payload = {
-    session_dir: $("set-session-dir").value.trim(),
+    read_scope: getRadio("read-scope"),
     read_dirs: readDirs,
     vision_model: $("set-vision").value.trim(),
     auto_approve: $("set-auto-approve").checked,
     show_thinking: $("set-thinking").checked,
   };
+  if (getRadio("sess-mode") === "remote") {
+    payload.session_remote = $("set-session-remote").value.trim();
+    payload.session_dir = "";
+  } else {
+    payload.session_remote = "";
+    payload.session_dir = $("set-session-dir").value.trim();
+  }
 
   try {
     const res = await fetch("/api/settings", {
@@ -938,7 +1096,6 @@ async function saveSettings() {
         "</ul>";
       $("set-msg").textContent = "部分已生效";
     } else {
-      $("set-restart").style.display = "none";
       $("set-msg").textContent = "已保存";
     }
     (data.notes || []).forEach((note) => pushNote("success", note));
@@ -949,6 +1106,55 @@ async function saveSettings() {
     button.disabled = false;
   }
 }
+
+async function syncSessions() {
+  const button = $("btn-sync");
+  button.disabled = true;
+  $("sync-msg").textContent = "同步中…";
+  try {
+    const res = await fetch("/api/session-sync", { method: "POST" });
+    const data = await res.json();
+    $("sync-msg").textContent = (data.ok ? "✓ " : "✗ ") + data.message;
+  } catch (err) {
+    $("sync-msg").textContent = "✗ " + err;
+  }
+  button.disabled = false;
+}
+
+document.querySelectorAll('input[name="sess-mode"], input[name="read-scope"]')
+  .forEach((el) => el.addEventListener("change", syncVisibility));
+
+$("pick-session-dir").addEventListener("click", async () => {
+  const r = await browseFolder("选择会话保存目录");
+  if (r.ok) $("set-session-dir").value = r.path;
+  else if (!r.cancelled) pushNote("warn", "没能打开选择框：" + (r.error || "") + "（可以直接手输路径）");
+});
+
+$("pick-read-dir").addEventListener("click", async () => {
+  const r = await browseFolder("选择要允许读取的目录");
+  if (r.ok) {
+    if (!readDirs.includes(r.path)) readDirs.push(r.path);
+    renderReadDirs();
+  } else if (!r.cancelled) {
+    pushNote("warn", "没能打开选择框：" + (r.error || "") + "（可以点「手动输入」）");
+  }
+});
+
+$("add-read-dir").addEventListener("click", () => {
+  const value = window.prompt("输入目录路径（支持 ~）：");
+  if (!value || !value.trim()) return;
+  const dir = value.trim();
+  if (!readDirs.includes(dir)) readDirs.push(dir);
+  renderReadDirs();
+});
+
+$("btn-sync").addEventListener("click", syncSessions);
+
+$("set-session-dir").addEventListener("input", (e) => {
+  const raw = e.target.value.trim();
+  $("set-session-resolved").textContent =
+    raw || settingsCache?.session_dir_default || "";
+});
 
 $("btn-settings").addEventListener("click", openSettings);
 $("settings-close").addEventListener("click", closeSettings);

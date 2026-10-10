@@ -68,8 +68,22 @@ class WorkspaceError(Exception):
     """路径越界或非法访问。"""
 
 
+# 读工作区外文件的策略
+READ_SCOPE_ALL = "all"           # 任何位置都可以读，不问（默认）
+READ_SCOPE_LISTED = "listed"     # VA_READ_DIRS 里列的免问，其余每次问
+READ_SCOPE_WORKSPACE = "workspace"  # 完全不许越界
+
+READ_SCOPES = (READ_SCOPE_ALL, READ_SCOPE_LISTED, READ_SCOPE_WORKSPACE)
+
+
 class Workspace:
-    def __init__(self, root: str | Path, *, extra_read_roots: "list[str] | tuple[str, ...]" = ()) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        extra_read_roots: "list[str] | tuple[str, ...]" = (),
+        read_scope: str = READ_SCOPE_ALL,
+    ) -> None:
         self.root = Path(root).expanduser().resolve()
         if not self.root.is_dir():
             raise WorkspaceError(f"工作区不存在或不是目录：{self.root}")
@@ -86,6 +100,7 @@ class Workspace:
         # 预先放行的额外读取目录（VA_READ_DIRS）。放进来之后读它们不再询问。
         self.extra_read_roots: list[Path] = [self.home]
         self._user_read_roots = 0
+        self.read_scope = read_scope if read_scope in READ_SCOPES else READ_SCOPE_ALL
         for entry in extra_read_roots:
             try:
                 candidate = Path(str(entry)).expanduser().resolve()
@@ -128,8 +143,23 @@ class Workspace:
             for extra in self.extra_read_roots
         )
 
+    def external_read_allowed(self) -> bool:
+        """允许读工作区外的东西吗（策略层面）。"""
+        return self.read_scope != READ_SCOPE_WORKSPACE
+
     def needs_external_approval(self, path: str | Path) -> bool:
-        """读这个路径要不要先问用户。工作区内的和 VA_READ_DIRS 里的不用问。"""
+        """读这个路径要不要先问用户。
+
+        * ``all``       —— 任何位置都不问（默认）
+        * ``listed``    —— VA_READ_DIRS 里列的免问，其余每次问
+        * ``workspace`` —— 根本不允许越界（下面那个 allowed 会拦住）
+        """
+        if self.read_scope == READ_SCOPE_ALL:
+            return False
+        if self.read_scope == READ_SCOPE_WORKSPACE:
+            # 这个策略下越界是**禁止**，不是「需要同意」。
+            # 返回 True 会弹一个无论点什么都读不了的审批框，纯属浪费用户时间。
+            return False
         return not self.readable(path)
 
     def writable_output(self, path: str | Path) -> bool:

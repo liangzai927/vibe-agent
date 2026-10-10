@@ -93,7 +93,7 @@ class WebApp:
         self._task_lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self.started_at = time.time()
-        self.env_path = env_path or (AGENT_DIR / ".env")
+        self.env_path = env_path or Config.env_file(AGENT_DIR)
         # 和 env_path 一样可以重定向。测试必须能把这些指到临时目录去——
         # 不然「跑一次测试」就会把开发者真实的配置和模型缓存冲掉。
         self.models_dir = models_dir or AGENT_DIR
@@ -121,6 +121,9 @@ class WebApp:
                 agent_home() / "sessions" / project_slug(self.workspace.root)
             ),
             "read_dirs": [str(d) for d in self.workspace.extra_read_roots if d != self.workspace.home],
+            "read_scope": self.workspace.read_scope,
+            "session_remote": self.cfg.session_remote,
+            "picker": self._picker_status(),
             "home": str(self.workspace.home),
             "home_display": describe(self.workspace.home),
             "vision_model": self.cfg.vision_model,
@@ -128,6 +131,13 @@ class WebApp:
             "show_thinking": self.cfg.show_thinking,
             "env_path": str(self.env_path),
         }
+
+    @staticmethod
+    def _picker_status() -> dict[str, Any]:
+        from ..dialogs import available
+
+        ok, how = available()
+        return {"available": ok, "how": how}
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         """校验 → 写 .env → 热应用能应用的。返回改了什么、哪些要重启。"""
@@ -152,12 +162,53 @@ class WebApp:
                 values["VA_SESSION_DIR"] = raw
                 # SessionStore.default_dir 每次都读环境变量，所以新会话立刻生效
                 os.environ["VA_SESSION_DIR"] = str(target)
+                # 本地目录和远端互斥
+                values["VA_SESSION_REMOTE"] = ""
+                os.environ.pop("VA_SESSION_REMOTE", None)
                 notes.append(f"新会话将保存到 {target}")
             else:
                 values["VA_SESSION_DIR"] = ""
                 os.environ.pop("VA_SESSION_DIR", None)
                 notes.append("已恢复默认位置（项目外）")
             changed.append("session_dir")
+
+        # ---- 会话远端 ----
+        if "session_remote" in payload:
+            from ..session_sync import ensure_clone
+
+            remote = str(payload["session_remote"] or "").strip()
+            if remote:
+                ready = ensure_clone(remote)
+                if not ready.ok:
+                    # 克隆失败就**不要**写进配置。否则会出现「我明明配了远端，
+                    # 记录却还在本地」这种最难查的状态。
+                    return {
+                        "ok": False,
+                        "error": f"连不上这个 git 仓库：{ready.detail}",
+                    }
+                values["VA_SESSION_REMOTE"] = remote
+                os.environ["VA_SESSION_REMOTE"] = remote
+                # 远端和本地目录是互斥的，写远端时把本地那个清掉，免得下次
+                # 让人以为配的是本地
+                values["VA_SESSION_DIR"] = ""
+                os.environ.pop("VA_SESSION_DIR", None)
+                notes.append(f"会话将同步到 {remote}")
+            else:
+                values["VA_SESSION_REMOTE"] = ""
+                os.environ.pop("VA_SESSION_REMOTE", None)
+                notes.append("已改回只存本地")
+            changed.append("session_remote")
+
+        # ---- 读取范围 ----
+        if "read_scope" in payload:
+            from ..workspace import READ_SCOPES
+
+            scope = str(payload["read_scope"] or "").strip().lower()
+            if scope not in READ_SCOPES:
+                return {"ok": False, "error": f"未知的读取范围：{scope}"}
+            values["VA_READ_SCOPE"] = scope
+            changed.append("read_scope")
+            restart.append("读取范围（工作区已经建好了，要重启才认）")
 
         # ---- 外部可读目录 ----
         if "read_dirs" in payload:
@@ -450,6 +501,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self.app.settings())
             return
 
+        if parsed.path == "/api/pick-folder":
+            # 浏览器给不出真实路径，所以由服务端弹系统原生选择框
+            from ..dialogs import pick_folder
+
+            params = parse_qs(parsed.query)
+            prompt = (params.get("prompt") or ["选择文件夹"])[0]
+            result = pick_folder(prompt)
+            self._json(
+                {
+                    "ok": result.ok,
+                    "path": result.path,
+                    "cancelled": result.cancelled,
+                    "error": result.error,
+                }
+            )
+            return
+
         if parsed.path == "/api/models":
             self._json(self.app.models())
             return
@@ -534,6 +602,14 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._body()
             result = self.app.update_settings(payload)
             self._json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == "/api/session-sync":
+            # 推送是外部可见的动作，所以只在明确点「同步」时才做
+            from ..session_sync import sync
+
+            result = sync(self.app.cfg.session_remote)
+            self._json({"ok": result.ok, "message": result.describe()})
             return
 
         if parsed.path == "/api/model":

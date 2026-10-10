@@ -87,11 +87,28 @@ class Config:
     # 读起来不再逐次询问；不列的每次都会问，并把完整路径摆给用户看。
     # 分隔符用 os.pathsep（POSIX 是 :，Windows 是 ;）。
     read_dirs: list[str] = field(default_factory=list)
+    # 读工作区外文件的策略：all（默认，不问）/ listed（只放行列出的）/ workspace（不许越界）
+    read_scope: str = "all"
+    # 会话同步到 git 远端（可选）。为空表示只存本地。
+    session_remote: str = ""
     # ---- 视觉模型（用于「截图 vs 设计图」比对，可选）----
     # 主模型多数不支持图片（如 deepseek-chat），所以单独配一个多模态模型。
     vision_model: str = ""
     vision_base_url: str = ""
     vision_api_key: str = ""
+
+    @staticmethod
+    def env_file(pkg_root: Path | None = None) -> Path:
+        """配置写哪儿。
+
+        顺序和 ``load()`` 保持一致：``VA_ENV_FILE`` 优先，
+        否则用包目录下的 ``.env``。
+        """
+        explicit = (os.environ.get("VA_ENV_FILE") or "").strip()
+        if explicit:
+            return Path(explicit).expanduser()
+        root = pkg_root or Path(__file__).resolve().parent.parent
+        return root / ".env"
 
     @property
     def has_vision(self) -> bool:
@@ -111,8 +128,16 @@ class Config:
     @classmethod
     def load(cls, workspace: str | Path | None = None) -> "Config":
         pkg_root = Path(__file__).resolve().parent.parent
-        load_dotenv(Path.cwd() / ".env")
-        load_dotenv(pkg_root / ".env")
+
+        # VA_ENV_FILE 显式指定配置文件。
+        # 有了它，开发/测试/多套配置才能把配置指向别处——否则任何一次
+        # 「跑一下试试」都会写到用户真实的那份 .env 上。
+        explicit = (os.environ.get("VA_ENV_FILE") or "").strip()
+        if explicit:
+            load_dotenv(Path(explicit).expanduser())
+        else:
+            load_dotenv(Path.cwd() / ".env")
+            load_dotenv(pkg_root / ".env")
 
         ws = workspace or os.environ.get("VA_WORKSPACE") or Path.cwd()
         ws_path = Path(ws).expanduser().resolve()
@@ -151,6 +176,8 @@ class Config:
             context_budget=int(os.environ.get("VA_CONTEXT_BUDGET", "60000") or 60000),
             max_delegate_depth=max(0, int(os.environ.get("VA_MAX_DELEGATE_DEPTH", "1") or 1)),
             read_dirs=_split_paths(os.environ.get("VA_READ_DIRS")),
+            read_scope=(os.environ.get("VA_READ_SCOPE") or "all").strip().lower(),
+            session_remote=(os.environ.get("VA_SESSION_REMOTE") or "").strip(),
             vision_model=(os.environ.get("VA_VISION_MODEL") or "").strip(),
             vision_base_url=(os.environ.get("VA_VISION_BASE_URL") or "").strip(),
             vision_api_key=(os.environ.get("VA_VISION_API_KEY") or "").strip(),

@@ -145,6 +145,15 @@ class WorkspaceTool(Tool):
         在 ~/Downloads，而不是在项目里。调用方有义务配套实现
         ``needs_approval()``，否则越界读取就没有任何拦截了。
         """
+        # scope=workspace 时越界是禁止的——这里就要拦住，
+        # 不能指望「审批会被拒」，因为那种设置下根本不会弹审批。
+        if not self.workspace.external_read_allowed() and not self.workspace.readable(path):
+            raise ToolError(
+                f"当前设置只允许读工作区内的文件：{path!r}\n"
+                f"（想读工作区外，在设置里把「允许读取工作区外的文件」"
+                f"改成「全部」或列出具体目录）"
+            )
+
         try:
             return self.workspace.resolve_readable(path, must_exist=True)
         except WorkspaceError as exc:

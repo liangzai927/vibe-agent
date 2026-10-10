@@ -102,6 +102,13 @@ class SessionStore:
         **旧位置里已经有会话的话就继续用它**——装作没看见等于把用户的
         历史弄丢，而迁移这种事该由用户决定什么时候做。
         """
+        # 远端优先：配了 git 地址就用本地克隆那份
+        remote = os.environ.get("VA_SESSION_REMOTE", "").strip()
+        if remote:
+            from .session_sync import remote_dir
+
+            return remote_dir(remote)
+
         override = os.environ.get("VA_SESSION_DIR", "").strip()
         if override:
             return Path(override).expanduser()

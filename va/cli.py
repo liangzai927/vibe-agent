@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg.max_iterations = args.max_steps
 
     try:
-        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs)
+        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs, read_scope=cfg.read_scope)
     except WorkspaceError as exc:
         print(red(f"工作区错误：{exc}"), file=sys.stderr)
         return 2
@@ -170,7 +170,10 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg.api_key and not args.task and sys.stdin.isatty():
         from .setup import run as run_setup
 
-        result = run_setup(workspace.root / ".env", directory=Path(__file__).resolve().parent.parent)
+        result = run_setup(
+            Config.env_file(Path(__file__).resolve().parent.parent),
+            directory=Path(__file__).resolve().parent.parent,
+        )
         if not result.ok:
             print(red(f"配置未完成：{result.error}"), file=sys.stderr)
             return 2
@@ -544,7 +547,7 @@ def _doctor(argv: list[str]) -> int:
         except OSError:
             pass
     try:
-        workspace = Workspace(root, extra_read_roots=cfg.read_dirs)
+        workspace = Workspace(root, extra_read_roots=cfg.read_dirs, read_scope=cfg.read_scope)
     except WorkspaceError as exc:
         print(red(f"工作区问题：{exc}"), file=sys.stderr)
         return 1
@@ -605,7 +608,7 @@ def _web(argv: list[str]) -> int:
         cfg.max_iterations = args.max_steps
 
     try:
-        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs)
+        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs, read_scope=cfg.read_scope)
     except WorkspaceError as exc:
         print(red(f"工作区错误：{exc}"), file=sys.stderr)
         return 2
@@ -673,7 +676,7 @@ def _setup(argv: list[str]) -> int:
     from .setup import run as run_setup
 
     directory = Path(__file__).resolve().parent.parent
-    env_path = directory / ".env"
+    env_path = Config.env_file(directory)
 
     if env_path.is_file() and not args.force:
         print(dim(f"  {env_path} 已存在。要重新配置加 --force；"))
@@ -852,7 +855,7 @@ def _switch_model(agent: Agent, ui: UI, name: str) -> None:
     ui.success(f"已切换到 {name}")
 
     try:
-        write_env_values(Path(__file__).resolve().parent.parent / ".env", {"VA_MODEL": name})
+        write_env_values(Config.env_file(Path(__file__).resolve().parent.parent), {"VA_MODEL": name})
         ui.info("已写进 .env，下次启动还是这个模型")
     except OSError as exc:
         ui.warn(f"写 .env 失败（本次会话仍生效）：{exc}")
@@ -905,7 +908,7 @@ def _feature(argv: list[str]) -> int:
     cfg.require_key()
 
     try:
-        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs)
+        workspace = Workspace(cfg.workspace, extra_read_roots=cfg.read_dirs, read_scope=cfg.read_scope)
     except WorkspaceError as exc:
         print(red(f"工作区错误：{exc}"), file=sys.stderr)
         return 2

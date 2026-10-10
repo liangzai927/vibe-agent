@@ -59,7 +59,12 @@ x-common: &common
     - VA_SHOW_THINKING
     # VA_WORKSPACE 不在这里透传：镜像已经 ENV 设成 /workspace，
     # 写裸 key 反而会把镜像的值删掉。要改就直接写死值。
+    # 显式指定配置文件位置（一般不用设）
+    - VA_ENV_FILE
     - VA_SESSION_DIR
+    - VA_SESSION_REMOTE
+    # 默认 all（读任何位置的图片/文档都不问）。listed / workspace 更严格。
+    - VA_READ_SCOPE
     # ---- 视觉模型（UI 对比用，可选）----
     - VA_VISION_API_KEY
     - VA_VISION_BASE_URL
