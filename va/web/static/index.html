@@ -696,11 +696,75 @@ async function answerApproval(id, answer, card) {
   }
 }
 
+let sessionInfo = null;
+let headBase = "";
+
+function renderHead() {
+  // 头部**唯一**的渲染入口。多处各写各的，后到的那次就会把别的内容冲掉。
+  if (!headBase) return;
+  $("head-meta").innerHTML = headBase + sessionLabel();
+}
+
+function sessionLabel() {
+  // 会话信息由 loadHistory 拿到，但 banner 事件可能先到或后到，
+  // 所以两边都渲染一次，谁后到都能显示全。
+  if (!sessionInfo || !sessionInfo.saved || !sessionInfo.id) return "";
+  return (
+    ` · 会话 <code>${escapeHtml(sessionInfo.id)}</code>` +
+    (sessionInfo.title ? ` · ${escapeHtml(sessionInfo.title)}` : "")
+  );
+}
+
+async function loadHistory() {
+  // 打开页面先把**当前会话已有的记录**渲染出来。
+  // 不做这一步的话，va web 虽然加载了会话，界面上还是一片空白——
+  // 用户会以为记录丢了。
+  let data;
+  try {
+    data = await fetch("/api/history").then((r) => r.json());
+  } catch (err) {
+    return;   // 拿不到历史不算错误，继续用空界面
+  }
+
+  const info = data.session || {};
+  if (info.saved && info.id) {
+    // 存起来而不是直接写 DOM：banner 事件在连接建立后才到，
+    // 会把 head-meta 整个覆盖掉。
+    sessionInfo = info;
+    // 可能 banner 已经先到过了——那就补上会话那一段
+    renderHead();
+  }
+
+  for (const m of data.messages || []) {
+    switch (m.kind) {
+      case "user":
+        pushUser(m.text);
+        break;
+      case "assistant": {
+        const el = ensureStream("text");
+        el._raw += m.text;
+        el.textContent = el._raw;
+        closeStream();
+        break;
+      }
+      case "tool": {
+        const details = pushToolCall({ name: m.name, summary: m.args, index: 1, total: 1 });
+        details.querySelector(".mark").textContent = "◇";
+        break;
+      }
+      case "result":
+        fillToolResult({ text: m.text, ok: true });
+        break;
+    }
+  }
+  scrollDown(true);
+}
+
 function handle(ev) {
   switch (ev.type) {
     case "banner":
-      $("head-meta").innerHTML =
-        `<b>${escapeHtml(ev.model)}</b> · ${escapeHtml(ev.workspace)}`;
+      headBase = `<b>${escapeHtml(ev.model)}</b> · ${escapeHtml(ev.workspace)}`;
+      renderHead();
       break;
     case "user":          pushUser(ev.text); break;
     case "text_delta": {
@@ -850,8 +914,10 @@ function connect() {
     const state = await fetch("/api/state").then((r) => r.json()).catch(() => null);
     if (state) {
       setStatus(state.busy);
-      $("head-meta").innerHTML =
-        `<b>${escapeHtml(state.model)}</b> · ${escapeHtml(state.workspace)}`;
+      // 头部只有**这一个**拼装点，别处都调 renderHead()——
+      // 之前这里和 banner 各写各的，onopen 的 fetch 后到就把会话那一段冲掉了。
+      headBase = `<b>${escapeHtml(state.model)}</b> · ${escapeHtml(state.workspace)}`;
+      renderHead();
       $("upload-hint").textContent = state.vision_model
         ? `视觉模型：${state.vision_model}` : "未配视觉模型（inspect_image 仍可用）";
     }
@@ -1348,7 +1414,9 @@ document.addEventListener("keydown", (e) => {
 
 // ---------------------------------------------------------------- 启动
 loadModels();
-connect();
+// 先把历史渲染完再连事件流：两者并发的话，banner 可能先到，
+// 头部就会漏掉会话那一段（谁先完成是不确定的）。
+loadHistory().finally(() => connect());
 input.focus();
 </script>
 </body>

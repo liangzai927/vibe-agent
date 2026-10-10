@@ -249,14 +249,23 @@ def _open_session(
         meta, history, plan = store.load()
         return store, history, _staleness_note(meta, root), plan
 
-    if args.continue_:
+    # 浏览器界面默认接着上一次：打开就看到之前的对话。
+    # 每次进去都是空白页，等于把「记录」这件事白做了。
+    # 命令行不加 --continue 时仍然开新的——那边一条命令就是一个任务。
+    # 浏览器界面默认接着上一次：打开就看到之前的对话。
+    # 每次进去都是空白页，等于把「记录」这件事白做了。
+    # 命令行不加 --continue 时仍然开新的——那边一条命令就是一个任务。
+    resume_latest = args.continue_ or (
+        getattr(args, "resume_latest_by_default", False)
+        and not getattr(args, "force_new", False)
+    )
+    if resume_latest:
         store = SessionStore.latest(root)
-        if store is None:
+        if store is not None:
+            meta, history, plan = store.load()
+            return store, history, _staleness_note(meta, root), plan
+        if args.continue_:
             ui.warn("没有找到历史会话，已新建一个。")
-            _warn_sessions_not_ignored(workspace, ui)
-            return _create_session(root, cfg, ui), [], "", None
-        meta, history, plan = store.load()
-        return store, history, _staleness_note(meta, root), plan
 
     _warn_sessions_not_ignored(workspace, ui)
     return _create_session(root, cfg, ui), [], "", None
@@ -633,6 +642,10 @@ def _web(argv: list[str]) -> int:
         return 2
 
     from .web import WebApp, serve
+
+    # web 模式默认接着上一次会话：打开就看到之前的对话。
+    # 每次进来都是空白页，等于把「记录」这件事白做了。
+    args.resume_latest_by_default = True
 
     app = WebApp(cfg, workspace, auto_approve=cfg.auto_approve)
 

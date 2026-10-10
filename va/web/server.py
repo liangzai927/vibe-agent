@@ -149,6 +149,7 @@ class WebApp:
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         """校验 → 写 .env → 热应用能应用的。返回改了什么、哪些要重启。"""
         from ..config import write_env_values
+        from ..paths import data_root, describe
 
         values: dict[str, str] = {}
         changed: list[str] = []
@@ -184,7 +185,9 @@ class WebApp:
             from ..data_repo import run as run_setup
 
             url = str(payload.get("url") or "").strip()
-            outcome = run_setup(url)
+            # 切换前的数据根：工作流会把里面的记忆和会话搬过去
+            before_root = data_root()
+            outcome = run_setup(url, local_root=before_root)
             if not outcome.ok:
                 # 失败就不写配置——不然会变成「配了远端但数据还在本地」
                 return {
@@ -207,6 +210,13 @@ class WebApp:
             self.cfg.auto_sync = True
             self.cfg.data_remote = url
             changed.extend(["data_remote", "auto_sync"])
+
+            # 正在用的这条会话也要跟着走，否则它还在往老路径写，
+            # 自动同步推的是新克隆——看起来就是「同步成功但会话没进去」
+            rebound = self._rebind_session()
+            if rebound:
+                notes.append(rebound)
+
             # **必须先落盘再返回**：这个分支以前直接 return，
             # 跳过了后面统一的写 .env 步骤——结果是仓库初始化成功、
             # 配置却没保存，重启后 data_remote 又是空的，自动同步永远不触发。
@@ -392,6 +402,7 @@ class WebApp:
             "base_url": self.cfg.base_url,
             "vision_model": self.cfg.vision_model,
             "session": self.agent.session_id or "",
+            "session_info": self.session_info(),
             "seq": self.bus.seq,
             "auto_approve": self.ui.auto_approve,
             "awaiting_approval": self.gate.waiting,
@@ -429,6 +440,110 @@ class WebApp:
 
             # 回复结束 → 自动同步（后台线程，不阻塞界面）
             self.auto_sync_now()
+
+    def history(self) -> list[dict[str, Any]]:
+        """把已加载的会话记录转成界面能直接渲染的列表。
+
+        **不做任何解释性加工**——只把内部的消息格式摊平成一条条
+        「谁说了什么、调了什么工具、结果是什么」。加工会让历史和
+        当初实际发生的事对不上，而历史的价值恰恰在于它忠实。
+        """
+        out: list[dict[str, Any]] = []
+        for message in getattr(self.agent, "messages", []):
+            role = message.get("role")
+            if role == "system":
+                continue
+            if role == "user":
+                text = message.get("content")
+                if isinstance(text, str) and text.strip():
+                    out.append({"kind": "user", "text": text})
+            elif role == "assistant":
+                text = message.get("content")
+                if isinstance(text, str) and text.strip():
+                    out.append({"kind": "assistant", "text": text})
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    out.append(
+                        {
+                            "kind": "tool",
+                            "name": function.get("name") or "?",
+                            "args": function.get("arguments") or "",
+                        }
+                    )
+            elif role == "tool":
+                text = message.get("content")
+                out.append(
+                    {
+                        "kind": "result",
+                        "text": text if isinstance(text, str) else str(text or ""),
+                        "name": message.get("name") or "",
+                    }
+                )
+        return out
+
+    def session_info(self) -> dict[str, Any]:
+        """当前会话的概况，界面顶部显示用。"""
+        from ..paths import describe
+        store = getattr(self.agent, "session", None)
+        if store is None:
+            return {"saved": False, "id": "", "path": "", "title": "", "count": 0}
+        meta = store.meta
+        return {
+            "saved": True,
+            "id": meta.id,
+            "path": describe(store.path),
+            "title": meta.title or "",
+            "count": meta.message_count,
+            "created": meta.created_text,
+        }
+
+    def _rebind_session(self) -> str:
+        """把**正在用的**这条会话挪到当前该在的位置。
+
+        这是「同步成功但会话没进 git」的根因：会话存储在 ``va web`` 启动时
+        就建好了，路径只算一次。之后在设置里改了存储位置，环境变量是变了，
+        可这个 store 还指着老路径——消息继续写到老地方，推送自然没内容。
+
+        返回一句给用户看的说明（没搬就返回空串）。
+        """
+        import shutil as _shutil
+
+        from ..session import SessionStore
+
+        store = getattr(self.agent, "session", None)
+        if store is None:
+            return ""
+
+        target_dir = SessionStore.default_dir(self.workspace.root)
+        if store.path.parent == target_dir:
+            return ""
+
+        target = target_dir / store.path.name
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if store.path.is_file() and not target.exists():
+                _shutil.copy2(store.path, target)
+            store.path = target
+        except OSError as exc:
+            return f"会话没能搬到新位置（{exc}），本次记录仍在旧路径"
+
+        return f"当前会话已挪到 {target}"
+
+    def _relocate(self, before_root: Path, after_root: Path) -> list[str]:
+        """把旧位置的数据搬到新位置，并重定向当前会话。"""
+        from ..data_repo import migrate
+
+        notes: list[str] = []
+        if str(before_root) != str(after_root):
+            moved = migrate(before_root, after_root)
+            if not moved.ok:
+                notes.append(f"迁移没做完：{moved.error}")
+            elif moved.copied or moved.skipped:
+                notes.append(f"已把之前的内容搬过来：{moved.describe()}")
+        rebound = self._rebind_session()
+        if rebound:
+            notes.append(rebound)
+        return notes
 
     def auto_sync_now(self) -> None:
         """回复结束后自动同步一次。
@@ -609,6 +724,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self._asset("index.html")
             return
+        if parsed.path == "/api/history":
+            self._json({
+                "messages": self.app.history(),
+                "session": self.app.session_info(),
+            })
+            return
+
         if parsed.path == "/api/state":
             self._json(self.app.state())
             return

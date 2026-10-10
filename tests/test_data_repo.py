@@ -63,37 +63,90 @@ class WorkflowTestCase(AgentTestCase):
 
 
 class TestStepCheck(WorkflowTestCase):
-    """第 1 步：必须是空白仓库。"""
+    """第 1 步：远端能不能用，该初始化还是接管。
 
-    def test_empty_remote_passes(self):
-        ok, why = data_repo.check_remote(str(self.origin))
+    三种情况：
+      * 空白                  → 初始化
+      * 非空但是我们的仓库     → 接管（把里面的会话拉过来）
+      * 非空且不是我们的       → 拒绝
+    """
+
+    def test_empty_remote_means_initialise(self):
+        ok, why, action = data_repo.inspect_remote(str(self.origin))
         self.assertTrue(ok, why)
+        self.assertEqual(action, data_repo.ACTION_INIT)
 
-    def test_non_empty_remote_is_refused(self):
+    def test_foreign_repo_is_refused(self):
         self.seed_remote()
-        ok, why = data_repo.check_remote(str(self.origin))
+        ok, why, _ = data_repo.inspect_remote(str(self.origin))
         self.assertFalse(ok)
-        self.assertIn("空白仓库", why)
+        self.assertIn("不是本 agent 的记忆仓库", why)
+
+    def test_refusal_says_what_is_inside(self):
+        """只说「不行」没用——要告诉用户里面是什么，他才能判断。"""
+        self.seed_remote()
+        _, why, _ = data_repo.inspect_remote(str(self.origin))
+        self.assertIn("existing.txt", why, "要把仓库里已有的东西列出来")
 
     def test_refusal_explains_how_to_get_an_empty_one(self):
-        """光说「不是空的」不够——用户得知道怎么建一个空的。
-
-        最常见的原因就是在 GitHub 上建仓库时勾了 README。
-        """
+        """最常见的原因就是在 GitHub 上建仓库时勾了 README。"""
         self.seed_remote()
-        _, why = data_repo.check_remote(str(self.origin))
+        _, why, _ = data_repo.inspect_remote(str(self.origin))
         self.assertIn("不要勾选", why)
         self.assertIn("README", why)
 
+    def test_our_own_repo_is_adopted(self):
+        """第二次配置同一个仓库时，应该接管而不是报错。"""
+        data_repo.run(str(self.origin))
+
+        ok, why, action = data_repo.inspect_remote(str(self.origin))
+        self.assertTrue(ok, why)
+        self.assertEqual(action, data_repo.ACTION_ADOPT)
+        self.assertIn("记忆仓库", why)
+
     def test_unreachable_remote_is_reported(self):
-        ok, why = data_repo.check_remote("/definitely/not/a/repo")
+        ok, why, _ = data_repo.inspect_remote("/definitely/not/a/repo")
         self.assertFalse(ok)
         self.assertIn("连不上", why)
 
     def test_empty_url(self):
-        ok, why = data_repo.check_remote("")
+        ok, why, _ = data_repo.inspect_remote("")
         self.assertFalse(ok)
         self.assertIn("没填", why)
+
+
+class TestMarker(WorkflowTestCase):
+    """仓库标识：判断一个非空仓库能不能接管，靠的就是它。"""
+
+    def test_marker_is_written_on_init(self):
+        data_repo.run(str(self.origin))
+        clone = session_sync.remote_dir(str(self.origin), kind="data")
+        self.assertIsNotNone(data_repo.read_marker(clone))
+
+    def test_marker_reaches_the_remote(self):
+        data_repo.run(str(self.origin))
+        self.assertIn(data_repo.MARKER_FILE, self.remote_tree())
+
+    def test_marker_records_the_kind(self):
+        data_repo.run(str(self.origin))
+        clone = session_sync.remote_dir(str(self.origin), kind="data")
+        marker = data_repo.read_marker(clone)
+        self.assertEqual(marker["kind"], data_repo.MARKER_KIND)
+        self.assertIn("created", marker)
+
+    def test_missing_marker_reads_as_none(self):
+        self.assertIsNone(data_repo.read_marker(self.root))
+
+    def test_corrupt_marker_reads_as_none(self):
+        """文件坏了要当「不是我们的」处理，而不是崩掉。"""
+        (self.root / data_repo.MARKER_FILE).write_text("{ 不是 json", encoding="utf-8")
+        self.assertIsNone(data_repo.read_marker(self.root))
+
+    def test_someone_elses_marker_reads_as_none(self):
+        (self.root / data_repo.MARKER_FILE).write_text(
+            '{"kind": "something-else"}', encoding="utf-8"
+        )
+        self.assertIsNone(data_repo.read_marker(self.root))
 
 
 class TestStepInit(WorkflowTestCase):
@@ -152,12 +205,15 @@ class TestStepsReporting(WorkflowTestCase):
 
     def test_describe_steps_covers_the_whole_flow(self):
         keys = [s["key"] for s in data_repo.describe_steps()]
-        self.assertEqual(keys, [data_repo.STEP_CHECK, data_repo.STEP_INIT, data_repo.STEP_SYNC])
+        self.assertEqual(
+            keys,
+            [data_repo.STEP_CHECK, data_repo.STEP_INIT, data_repo.STEP_MIGRATE, data_repo.STEP_SYNC],
+        )
 
     def test_successful_run_reports_every_step(self):
         result = data_repo.run(str(self.origin))
         self.assertTrue(result.ok)
-        self.assertEqual(len(result.steps), 2, "成功路径应该报告「检查」和「初始化」两步")
+        self.assertEqual(len(result.steps), 2, "没给 local_root 时是「检查」+「初始化」两步")
         self.assertTrue(all(s.ok for s in result.steps))
         self.assertIsNone(result.failed_step)
 
@@ -363,7 +419,7 @@ class TestSetupThroughTheApi(AgentTestCase):
         """界面直接拿这份清单渲染，避免两边文案改歪。"""
         data = self.app.settings()
         self.assertIn("data_repo_steps", data)
-        self.assertEqual(len(data["data_repo_steps"]), 3)
+        self.assertEqual(len(data["data_repo_steps"]), len(data_repo.describe_steps()))
         for step in data["data_repo_steps"]:
             self.assertTrue(step["title"])
             self.assertTrue(step["detail"])
@@ -371,3 +427,226 @@ class TestSetupThroughTheApi(AgentTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestMigration(WorkflowTestCase):
+    """切换存储位置时，已有的记忆和会话要跟着走。
+
+    这条踩过坑：配置改了、路径算对了，但**正在用的那条会话**还指着老路径，
+    消息继续写到老地方，推送过去什么都没有——看起来就是「同步成功但记录没进去」。
+    """
+
+    def _seed_old_root(self) -> Path:
+        old = self.root / "old"
+        (old / "memory").mkdir(parents=True)
+        (old / "memory" / "偏好.md").write_text("提交信息用中文", encoding="utf-8")
+        sessions = old / "projects" / "proj-a" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "20260101-000000-aaaa.jsonl").write_text("{}\n", encoding="utf-8")
+        return old
+
+    def test_copies_memory_and_sessions(self):
+        old = self._seed_old_root()
+        new = self.root / "new"
+        new.mkdir()
+
+        result = data_repo.migrate(old, new)
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.copied, 2)
+        self.assertTrue((new / "memory" / "偏好.md").is_file())
+        self.assertTrue(
+            (new / "projects" / "proj-a" / "sessions" / "20260101-000000-aaaa.jsonl").is_file()
+        )
+
+    def test_does_not_delete_the_original(self):
+        """只复制不删除——切回去或者中途失败时东西还在。"""
+        old = self._seed_old_root()
+        new = self.root / "new"
+        new.mkdir()
+        data_repo.migrate(old, new)
+        self.assertTrue((old / "memory" / "偏好.md").is_file(), "原位置的被删了")
+
+    def test_does_not_overwrite_existing_files(self):
+        """新位置可能已经有内容（比如刚克隆下来的别人的记录）。"""
+        old = self._seed_old_root()
+        new = self.root / "new"
+        (new / "memory").mkdir(parents=True)
+        (new / "memory" / "偏好.md").write_text("远端已有的版本", encoding="utf-8")
+
+        result = data_repo.migrate(old, new)
+
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(
+            (new / "memory" / "偏好.md").read_text(encoding="utf-8"),
+            "远端已有的版本",
+            "覆盖了远端已有的文件",
+        )
+
+    def test_never_touches_git_directories(self):
+        old = self._seed_old_root()
+        (old / "projects" / ".git").mkdir(parents=True)
+        (old / "projects" / ".git" / "config").write_text("x", encoding="utf-8")
+        new = self.root / "new"
+        new.mkdir()
+
+        data_repo.migrate(old, new)
+
+        self.assertFalse((new / "projects" / ".git").exists(), "把 .git 也搬过去了")
+
+    def test_same_path_is_a_noop(self):
+        old = self._seed_old_root()
+        result = data_repo.migrate(old, old)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.copied, 0)
+
+    def test_missing_source_is_not_an_error(self):
+        new = self.root / "new"
+        new.mkdir()
+        result = data_repo.migrate(self.root / "nope", new)
+        self.assertTrue(result.ok, "源目录不存在不该算失败")
+
+
+class TestWorkflowWithMigration(WorkflowTestCase):
+    """完整工作流里带上迁移。"""
+
+    def test_run_reports_a_migration_step(self):
+        old = self.root / "old"
+        (old / "memory").mkdir(parents=True)
+        (old / "memory" / "x.md").write_text("x", encoding="utf-8")
+
+        result = data_repo.run(str(self.origin), local_root=old)
+
+        self.assertTrue(result.ok, result.describe())
+        keys = [s.key for s in result.steps]
+        self.assertIn(data_repo.STEP_MIGRATE, keys)
+
+        clone = session_sync.remote_dir(str(self.origin), kind="data")
+        self.assertTrue((clone / "memory" / "x.md").is_file(), "旧内容没搬过来")
+
+    def test_second_run_adopts_instead_of_failing(self):
+        """第二次配置同一个仓库要能接管，而不是报「不是空白仓库」。"""
+        first = data_repo.run(str(self.origin))
+        self.assertTrue(first.ok)
+
+        second = data_repo.run(str(self.origin))
+        self.assertTrue(second.ok, second.describe())
+        self.assertIn("接管", second.message)
+
+
+class TestHistoryAndSessions(AgentTestCase):
+    """浏览器界面要能看到之前的对话。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from va.web.server import WebApp
+
+        self.app = WebApp(self.cfg, self.workspace)
+
+    def test_history_is_empty_for_a_fresh_session(self):
+        self.assertEqual(self.app.history(), [])
+
+    def test_history_flattens_messages_for_display(self):
+        from va.session import SessionStore
+
+        store = SessionStore.create(self.root, "m")
+        store.append_message({"role": "user", "content": "帮我看下登录"})
+        store.append_message(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "1", "type": "function",
+                     "function": {"name": "read_file", "arguments": '{"path":"a.py"}'}}
+                ],
+            }
+        )
+        store.append_message({"role": "tool", "content": "内容", "name": "read_file"})
+        store.append_message({"role": "assistant", "content": "有三处问题"})
+
+        _, history, _ = store.load()
+        self.app.agent.messages = history
+
+        kinds = [m["kind"] for m in self.app.history()]
+        self.assertEqual(kinds, ["user", "tool", "result", "assistant"])
+
+    def test_system_messages_are_not_shown(self):
+        self.app.agent.messages = [
+            {"role": "system", "content": "提示词"},
+            {"role": "user", "content": "你好"},
+        ]
+        self.assertEqual([m["kind"] for m in self.app.history()], ["user"])
+
+    def test_session_info_reports_the_file(self):
+        from va.session import SessionStore
+
+        store = SessionStore.create(self.root, "m")
+        store.set_title("测试会话")
+        self.app.agent.session = store
+
+        info = self.app.session_info()
+        self.assertTrue(info["saved"])
+        self.assertEqual(info["title"], "测试会话")
+        self.assertTrue(info["path"].endswith(".jsonl"), info["path"])
+
+    def test_session_info_without_a_store(self):
+        self.app.agent.session = None
+        self.assertFalse(self.app.session_info()["saved"])
+
+
+class TestSessionRebinding(AgentTestCase):
+    """改了存储位置之后，**正在用的**那条会话必须跟着走。
+
+    这是「同步成功但记录没进 git」的根因：会话存储在服务启动时建好，
+    路径只算一次。之后改配置，环境变量变了，但那个 store 还指着老路径。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from va.tools import build_registry
+        from va.web.server import WebApp
+
+        self.app = WebApp(
+            self.cfg, self.workspace, registry=build_registry(self.workspace)
+        )
+
+    def test_rebinds_after_the_location_changes(self):
+        from va.session import SessionStore
+
+        store = SessionStore.create(self.root, "m", session_dir=self.root / "before")
+        store.append_message({"role": "user", "content": "旧位置写的"})
+        self.app.agent.session = store
+
+        os.environ["VA_SESSION_DIR"] = str(self.root / "after")
+        self.addCleanup(os.environ.pop, "VA_SESSION_DIR", None)
+
+        note = self.app._rebind_session()
+
+        self.assertIn("挪到", note)
+        self.assertEqual(store.path.parent, self.root / "after")
+        self.assertTrue(store.path.is_file(), "文件没跟着复制过去")
+        self.assertIn("旧位置写的", store.path.read_text(encoding="utf-8"))
+
+    def test_no_op_when_already_in_the_right_place(self):
+        from va.session import SessionStore
+
+        target = self.root / "same"
+        store = SessionStore.create(self.root, "m", session_dir=target)
+        self.app.agent.session = store
+        os.environ["VA_SESSION_DIR"] = str(target)
+        self.addCleanup(os.environ.pop, "VA_SESSION_DIR", None)
+
+        self.assertEqual(self.app._rebind_session(), "")
+
+    def test_writes_go_to_the_new_place_afterwards(self):
+        from va.session import SessionStore
+
+        store = SessionStore.create(self.root, "m", session_dir=self.root / "before")
+        self.app.agent.session = store
+        os.environ["VA_SESSION_DIR"] = str(self.root / "after")
+        self.addCleanup(os.environ.pop, "VA_SESSION_DIR", None)
+
+        self.app._rebind_session()
+        store.append_message({"role": "assistant", "content": "新位置写的"})
+
+        self.assertIn("新位置写的", store.path.read_text(encoding="utf-8"))

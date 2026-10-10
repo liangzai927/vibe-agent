@@ -129,6 +129,35 @@ def _git_commit(target: Path, message: str) -> "subprocess.CompletedProcess":
     )
 
 
+def commit_and_push(
+    target: Path, message: str, *, timeout: int = DEFAULT_TIMEOUT
+) -> tuple[bool, str]:
+    """在 ``target`` 里暂存 + 提交 + 推送。没有改动时不算失败。
+
+    单独抽出来是因为「初始化完再补一个提交」这种需求会出现两次以上——
+    到处重写 add/commit/push 三件套，早晚有一处忘了推。
+    """
+    add = _git(["add", "-A"], cwd=target)
+    if add.returncode != 0:
+        return False, f"暂存失败：{_explain(add.stderr)}"
+
+    status = _git(["status", "--porcelain"], cwd=target)
+    if not status.stdout.strip():
+        return True, "没有新记录"
+
+    commit = _git_commit(target, message)
+    if commit.returncode != 0:
+        return False, f"提交失败：{_explain(commit.stderr)}"
+
+    push = _git(["push"], cwd=target, timeout=timeout)
+    if push.returncode != 0:
+        return False, (
+            f"提交好了，但推送失败：{_explain(push.stderr)}\n"
+            f"记录没丢，是你本地还没推上去。网络恢复后重试即可。"
+        )
+    return True, "已推送"
+
+
 def bootstrap(url: str, *, kind: str = "data", timeout: int = DEFAULT_TIMEOUT) -> SyncResult:
     """把一个**空白**仓库初始化成数据仓库。
 
