@@ -22,6 +22,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .gitutil import explain as _explain
 from .paths import agent_home
 
 DEFAULT_TIMEOUT = 180
@@ -65,21 +66,6 @@ def _git(args: list[str], cwd: Path | None = None, timeout: int = DEFAULT_TIMEOU
         errors="replace",
         timeout=timeout,
     )
-
-
-def _explain(stderr: str) -> str:
-    text = (stderr or "").strip()
-    if not text:
-        return "git 没有给出原因"
-    last = text.splitlines()[-1]
-    lowered = last.lower()
-    if "could not resolve host" in lowered or "unable to access" in lowered:
-        return "连不上远端（检查网络和地址）"
-    if "permission denied" in lowered or "authentication failed" in lowered:
-        return "没有权限（检查 SSH key 或 token）"
-    if "repository not found" in lowered or "does not appear to be a git repository" in lowered:
-        return "远端仓库不存在或地址不对"
-    return last[:200]
 
 
 def ensure_clone(url: str, *, timeout: int = DEFAULT_TIMEOUT, pull: bool = True) -> SyncResult:

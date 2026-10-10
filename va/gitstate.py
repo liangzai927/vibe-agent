@@ -20,6 +20,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .gitutil import explain as _explain
+
 TIMEOUT = 60
 PUSH_TIMEOUT = 300
 
@@ -63,23 +65,6 @@ def _run(root: Path, *args: str, timeout: int = TIMEOUT) -> subprocess.Completed
         errors="replace",
         timeout=timeout,
     )
-
-
-def _explain(stderr: str) -> str:
-    text = (stderr or "").strip()
-    if not text:
-        return "git 没有给出原因"
-    last = text.splitlines()[-1]
-    lowered = last.lower()
-    if "could not resolve host" in lowered or "unable to access" in lowered:
-        return "连不上远端（检查网络和地址）"
-    if "permission denied" in lowered or "authentication failed" in lowered:
-        return "没有权限（检查 SSH key 或 token）"
-    if "not found" in lowered or "does not appear to be a git repository" in lowered:
-        return "远端仓库不存在或地址不对"
-    if "rejected" in lowered or "non-fast-forward" in lowered:
-        return "远端有你本地没有的提交，先拉取再推"
-    return last[:200]
 
 
 @dataclass
