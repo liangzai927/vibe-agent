@@ -418,7 +418,7 @@ class TestAgentSession(AgentTestCase):
         store = SessionStore.create(self.root, "fake")
         filler = "x" * 400
         llm = ScriptedLLM(
-            *[turn("", tc("run_bash", command=f"echo {filler}")) for _ in range(12)],
+            *[turn("", tc("run_bash", command=f"echo {filler} {i}")) for i in range(12)],
             turn("完成。"),
         )
         agent, _ = self.make_agent(llm, session=store)

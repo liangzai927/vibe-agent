@@ -55,6 +55,8 @@ class Agent:
         self.workspace = workspace or Workspace(cfg.workspace)
 
         self.plan_board = plan_board or PlanBoard()
+        # 最近几次工具调用，用来识别「原地打转」
+        self._recent_calls: list[tuple[str, str]] = []
         if plan is not None:
             self.plan_board.plan = plan
 
@@ -168,10 +170,35 @@ class Agent:
                 break
 
             self._execute_tool_calls(turn.tool_calls, step)
+
+            # 真正该防的是**打转**，不是干活多。
+            # 同一个工具用同样的参数连着调三次，说明它卡住了——
+            # 再给 200 步也只会重复这三次。这比按步数一刀切准确得多：
+            # 一个大任务跑 80 步是正常的，原地转三圈是不正常的。
+            stuck = self._detect_loop(turn.tool_calls)
+            if stuck:
+                self.ui.warn(stuck)
+                final_text = final_text or stuck
+                reason = "stuck"
+                break
+
             self._maybe_compact(force=False)
         else:
-            self.ui.warn(f"已达步数上限 {self.cfg.max_iterations}，强制停止。")
-            final_text = final_text or "[已达步数上限]"
+            # 走到这儿说明连上限都撞到了。不装作任务完成，也不丢下干过的活——
+            # 把话说明白，让用户决定是接着做还是拆小。
+            limit = self.cfg.max_iterations
+            self.ui.warn(
+                f"已经执行到步数上限（{limit} 步）还没结束，先停在这里。\n"
+                f"  两种可能：任务太大，或者卡在某个循环里。\n"
+                f"  接着做：加大上限（--max-steps 500）后 /continue；"
+                f"或者把任务拆成几步分别交代。"
+            )
+            final_text = (
+                (final_text + "\n\n") if final_text else ""
+            ) + (
+                f"[已达步数上限（{limit} 步），任务可能不完整。"
+                f"已完成的部分都在会话里，可以加大上限后用 --continue 接着做。]"
+            )
 
         self._finish_session(reason, steps_used)
         return final_text
@@ -242,6 +269,31 @@ class Agent:
             self.session.append_end(reason, steps)
         except OSError:
             pass
+
+    def _detect_loop(self, calls: list[ToolCall]) -> str | None:
+        """同一个工具用同样的参数连着调三次，就是在原地打转。
+
+        只比对**连续**的调用：中间插了别的动作说明它在推进，不算卡住。
+        参数用原始 JSON 字符串比——解析失败时也能比。
+        """
+        signatures = [(call.name, call.arguments) for call in calls]
+        self._recent_calls.extend(signatures)
+        del self._recent_calls[:-9]  # 只留最近几条，别无限长
+
+        repeat = self.cfg.loop_repeat_limit
+        if repeat <= 0 or len(self._recent_calls) < repeat:
+            return None
+
+        tail = self._recent_calls[-repeat:]
+        if any(sig != tail[0] for sig in tail):
+            return None
+
+        name = tail[0][0]
+        return (
+            f"检测到原地打转：连续 {repeat} 次用相同参数调用 {name}，先停在这里。\n"
+            f"  多半是工具返回的结果让它走进了死胡同——换一种做法，"
+            f"或者把当前情况告诉我。"
+        )
 
     def _execute_tool_calls(self, calls: list[ToolCall], step: int) -> None:
         total = len(calls)

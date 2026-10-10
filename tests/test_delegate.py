@@ -281,8 +281,10 @@ class TestDelegationEndToEnd(AgentTestCase):
 
     def test_max_steps_is_honoured(self):
         (self.root / "a.py").write_text("x = 1\n")
-        # 子 agent 每轮都调工具，跑到被强制停下
-        child = [turn("", call("read_file", path="a.py")) for _ in range(30)]
+        # 子 agent 每轮都调工具，跑到被强制停下。
+        # 参数必须逐步不同：一样的话会被「原地打转」检测先拦下，
+        # 那就测不到步数上限了。
+        child = [turn("", call("read_file", path=f"a{i}.py")) for i in range(30)]
         agent, _, _ = self._run(child_turns=child, max_steps=3)
         tool_msgs = [m for m in agent.messages if m.get("role") == "tool"]
         self.assertIn("步数上限", tool_msgs[0]["content"], "子 agent 没有在步数上限处停下")

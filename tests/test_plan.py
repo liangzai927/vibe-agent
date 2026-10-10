@@ -327,7 +327,7 @@ class TestPlanSurvivesCompaction(AgentTestCase):
                 {"title": "第二步", "status": "in_progress"},
                 {"title": "第三步"},
             ])),
-            *[turn("", tc("run_bash", command=f"echo {filler}")) for _ in range(12)],
+            *[turn("", tc("run_bash", command=f"echo {filler} {i}")) for i in range(12)],
             turn("完成。"),
         )
         agent, _ = self.make_agent(llm)

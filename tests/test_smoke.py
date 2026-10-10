@@ -254,7 +254,8 @@ class TestRobustness(AgentTestCase):
 
     def test_max_iterations_respected(self):
         self.cfg.max_iterations = 3
-        llm = ScriptedLLM(*[turn("", tc("list_dir")) for _ in range(10)])
+        # 参数必须逐步不同：一样的话会被打转检测先拦下，就测不到步数上限了
+        llm = ScriptedLLM(*[turn("", tc("list_dir", path=f"dir{i}")) for i in range(10)])
         agent, _ = self.make_agent(llm)
         answer = agent.run("无限循环")
         self.assertIn("上限", answer)
@@ -262,6 +263,101 @@ class TestRobustness(AgentTestCase):
 
 
 # --------------------------------------------------------------------- shell
+
+
+class TestLoopDetection(AgentTestCase):
+    """原地打转的检测。
+
+    用户要的是「别因为步数到了就停」，但**真的卡住了还是得停**——
+    再给 200 步也只会重复同样的无效动作。所以防的是打转，不是干活多。
+    """
+
+    def test_identical_calls_are_detected(self):
+        llm = ScriptedLLM(*[turn("", tc("list_dir", path="same")) for _ in range(9)])
+        agent, _ = self.make_agent(llm)
+        answer = agent.run("原地转圈")
+        self.assertIn("原地打转", answer)
+        self.assertLess(len(llm.received), 9, "不该把剧本跑完")
+
+    def test_varied_calls_are_not_flagged(self):
+        """每步内容不同就是正常干活，跑多少步都不该被拦。"""
+        llm = ScriptedLLM(
+            *[turn("", tc("list_dir", path=f"dir{i}")) for i in range(8)],
+            turn("做完了。"),
+        )
+        agent, _ = self.make_agent(llm)
+        answer = agent.run("看很多目录")
+        self.assertEqual(answer, "做完了。")
+
+    def test_interleaved_calls_are_not_a_loop(self):
+        """中间插了别的动作说明它在推进——只有**连续**相同才算卡住。"""
+        pattern = [
+            turn("", tc("list_dir", path="a")),
+            turn("", tc("list_dir", path="b")),
+        ] * 4
+        llm = ScriptedLLM(*pattern, turn("做完了。"))
+        agent, _ = self.make_agent(llm)
+        self.assertEqual(agent.run("来回看两个目录"), "做完了。")
+
+    def test_threshold_is_configurable(self):
+        self.cfg.loop_repeat_limit = 0  # 关掉检测
+        llm = ScriptedLLM(*[turn("", tc("list_dir", path="same")) for _ in range(6)],
+                          turn("做完了。"))
+        agent, _ = self.make_agent(llm)
+        self.assertEqual(agent.run("关掉检测"), "做完了。")
+
+    def test_higher_threshold_allows_more_repeats(self):
+        self.cfg.loop_repeat_limit = 5
+        llm = ScriptedLLM(*[turn("", tc("list_dir", path="same")) for _ in range(4)],
+                          turn("做完了。"))
+        agent, _ = self.make_agent(llm)
+        self.assertEqual(agent.run("允许重复几次"), "做完了。")
+
+    def test_reports_which_tool_looped(self):
+        llm = ScriptedLLM(*[turn("", tc("run_bash", command="ls")) for _ in range(5)])
+        agent, _ = self.make_agent(llm)
+        answer = agent.run("重复跑命令")
+        self.assertIn("run_bash", answer, "要说清楚是哪个工具在打转")
+
+    def test_default_iteration_limit_is_generous(self):
+        """上限是防跑飞的兜底，不该是「任务能做多大」的边界。"""
+        from va.config import Config
+
+        self.assertGreaterEqual(Config.load(self.root).max_iterations, 100)
+
+
+class TestNoStepNoise(AgentTestCase):
+    """不再把轮次当进度展示。
+
+    一个正常任务跑几十轮是常态，标出轮次只会让人以为「怎么又要一步」。
+    """
+
+    def test_terminal_ui_does_not_print_step_numbers(self):
+        import io
+        import contextlib
+        from va.ui import UI
+
+        ui = UI(self.workspace)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            ui.assistant_header(1)
+            ui.assistant_header(7)
+        output = buffer.getvalue()
+        self.assertNotIn("第 1 步", output)
+        self.assertNotIn("第 7 步", output)
+        self.assertNotIn("步", output)
+
+    def test_web_ui_does_not_emit_step_events(self):
+        from va.web.bridge import ApprovalGate, EventBus, WebUI
+
+        bus = EventBus()
+        ui = WebUI(self.workspace, bus, ApprovalGate(timeout=5))
+        ui.assistant_header(3)
+        self.assertEqual(
+            [e for e in bus.since(0) if e["type"] == "step"],
+            [],
+            "不该再发步号事件",
+        )
 
 
 class TestShell(AgentTestCase):
@@ -305,7 +401,7 @@ class TestCompaction(AgentTestCase):
         self.cfg.context_budget = 100  # 极低，强制触发
         filler = "x" * 400
         llm = ScriptedLLM(
-            *[turn("", tc("run_bash", command=f"echo {filler}")) for _ in range(12)],
+            *[turn("", tc("run_bash", command=f"echo {filler} {i}")) for i in range(12)],
             turn("完成。"),
         )
         agent, _ = self.make_agent(llm)
@@ -325,7 +421,7 @@ class TestCompaction(AgentTestCase):
         self.cfg.context_budget = 100
         filler = "y" * 400
         llm = ScriptedLLM(
-            *[turn("", tc("run_bash", command=f"echo {filler}")) for _ in range(14)],
+            *[turn("", tc("run_bash", command=f"echo {filler} {i}")) for i in range(14)],
             turn("done"),
         )
         agent, _ = self.make_agent(llm)

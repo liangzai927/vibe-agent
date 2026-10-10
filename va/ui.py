@@ -52,9 +52,14 @@ class UI:
     # ------------------------------------------------------------------ 流式
 
     def assistant_header(self, step: int) -> None:
+        """一轮回复开始。
+
+        刻意**不显示步号**：一个正常任务跑几十轮是常态，把轮次标出来只会
+        让人以为「怎么又要一步」，而它其实只是模型在陆续调工具。
+        留一个空行做视觉分隔就够了。
+        """
         self._close_stream()
         print()
-        print(blue(f"● 第 {step} 步"))
 
     def stream_text(self, piece: str) -> None:
         self._close_stream_thinking()

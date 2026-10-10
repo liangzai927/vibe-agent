@@ -680,7 +680,6 @@ function handle(ev) {
         `<b>${escapeHtml(ev.model)}</b> · ${escapeHtml(ev.workspace)}`;
       break;
     case "user":          pushUser(ev.text); break;
-    case "step":          pushStep(ev.step); break;
     case "text_delta": {
       const el = ensureStream("text");
       el._raw += ev.piece;

@@ -73,7 +73,12 @@ class Config:
     api_key: str
     base_url: str
     temperature: float = 0.0
-    max_iterations: int = 50
+    # 步数上限。**这只是防跑飞的兜底，不该是「任务做多大」的边界。**
+    # 一个真实的重构任务跑几十步很正常，所以给得宽。
+    # 真正该防的是原地打转，那由 loop_repeat_limit 负责。
+    max_iterations: int = 200
+    # 同一个工具用同样参数连续调几次就判定为打转。0 表示不检测。
+    loop_repeat_limit: int = 3
     max_tokens: int | None = None
     auto_approve: bool = False
     show_thinking: bool = True
@@ -169,7 +174,8 @@ class Config:
             api_key=api_key,
             base_url=base_url,
             temperature=float(os.environ.get("VA_TEMPERATURE", "0") or 0),
-            max_iterations=int(os.environ.get("VA_MAX_ITERATIONS", "50") or 50),
+            max_iterations=int(os.environ.get("VA_MAX_ITERATIONS", "200") or 200),
+            loop_repeat_limit=max(0, int(os.environ.get("VA_LOOP_REPEAT_LIMIT", "3") or 3)),
             max_tokens=int(max_tokens_raw) if max_tokens_raw.isdigit() else None,
             auto_approve=(os.environ.get("VA_AUTO_APPROVE", "").strip().lower() in _TRUTHY),
             show_thinking=(os.environ.get("VA_SHOW_THINKING", "1").strip().lower() in _TRUTHY),

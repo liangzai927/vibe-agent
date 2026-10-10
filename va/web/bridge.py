@@ -244,8 +244,12 @@ class WebUI(UI):
     # ------------------------------------------------------------- 流式
 
     def assistant_header(self, step: int) -> None:
+        """一轮回复开始。
+
+        只收尾上一段，**不发带步号的事件**——轮次不是用户关心的东西，
+        它只关心「活儿干完了没有」。
+        """
         self._end_message()
-        self.bus.publish("step", step=step)
 
     def stream_text(self, piece: str) -> None:
         self._push("text", piece)

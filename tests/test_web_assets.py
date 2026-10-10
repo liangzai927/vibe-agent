@@ -119,7 +119,7 @@ class TestAssetIntegrity(unittest.TestCase):
 
         # 后端会发的类型（人工维护，和 bridge/server 里的 publish 对应）
         backend_types = {
-            "banner", "step", "text_delta", "thinking_delta", "message_end",
+            "banner", "text_delta", "thinking_delta", "message_end",
             "note", "tool_call", "tool_result", "diff", "plan", "block",
             "rule", "answer", "approval", "approval_done", "user",
             "task_end", "model", "settings",

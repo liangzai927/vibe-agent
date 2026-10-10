@@ -299,7 +299,8 @@ docker build -t vibe-agent --build-arg WITH_BROWSER=0 --build-arg WITH_NODE=0 .
 | `VA_VISION_API_KEY` | 同 `VA_API_KEY` | 视觉模型 key |
 | `VA_WORKSPACE` | `/workspace` | agent 的工作区（沙箱根目录） |
 | `VA_TEMPERATURE` | `0` | 编码任务建议保持 0 |
-| `VA_MAX_ITERATIONS` | `50` | 单任务最大步数 |
+| `VA_MAX_ITERATIONS` | `200` | 单任务步数上限（**只是防跑飞的兜底**，不是任务能做多大的边界） |
+| `VA_LOOP_REPEAT_LIMIT` | `3` | 同一工具用同样参数连续调几次就判定为原地打转（0 关闭） |
 | `VA_MAX_DELEGATE_DEPTH` | `1` | 子 agent 最多嵌套几层（1 = 子 agent 不能再往下派） |
 | `VA_AUTO_APPROVE` | `0` | `1` = 跳过所有审批（危险） |
 | `VA_CONTEXT_BUDGET` | `60000` | 估算 token 超过此值就压缩历史 |
@@ -510,6 +511,37 @@ review_changes(requirement=...)       专门的代码审查
 
 一个都找不到时会给出可执行的修复命令，而不是丢一句
 `Executable doesn't exist` 让人自己猜。
+
+---
+
+## 步数上限和「原地打转」
+
+**跑了几轮不是进度，活儿干完没有才是。** 所以界面上不显示「第 N 步」——
+一个正常任务跑几十轮是常态，标出轮次只会让人以为「怎么又要一步」。
+
+上限仍然存在，但**换了个判据**：
+
+| | 旧做法 | 现在 |
+|---|---|---|
+| 什么时候停 | 到 50 步就停 | 只有**原地打转**才停 |
+| 默认值 | 50 步 | 200 步（纯兜底） |
+| 停下时 | `[已达步数上限]` | 说清为什么停、怎么接着做 |
+
+「原地打转」的判据是：**同一个工具用同样的参数连续调 3 次**。
+只比对连续调用——中间插了别的动作说明它在推进，不算卡住。
+
+这比按步数一刀切准得多：一个大重构跑 80 步是正常的，
+原地转三圈是不正常的，而后者再给 200 步也只会重复那三圈。
+
+真撞到上限时也不再假装任务完成：
+
+```
+⚠ 已经执行到步数上限（200 步）还没结束，先停在这里。
+  两种可能：任务太大，或者卡在某个循环里。
+  接着做：加大上限（--max-steps 500）后 /continue；或者把任务拆成几步分别交代。
+```
+
+阈值可以调：`VA_LOOP_REPEAT_LIMIT=0` 关掉检测，`VA_MAX_ITERATIONS` 改上限。
 
 ---
 
@@ -895,7 +927,7 @@ venv（playwright + Pillow + pyyaml）416 tests, OK (skipped=2)
 
 | 文件 | 覆盖 |
 |---|---|
-| `test_smoke.py` | 假 LLM 驱动真实工具：读写、精确编辑、沙箱越界、审批拒绝、未知工具、参数畸形、步数上限、git 操作 |
+| `test_smoke.py` | 假 LLM 驱动真实工具：读写、精确编辑、沙箱越界、审批拒绝、未知工具、参数畸形、步数上限、**原地打转检测**、git 操作 |
 | `test_llm_stream.py` | mock OpenAI 服务真实走 HTTP + SSE，验证流式 `tool_calls` 分片拼接 |
 | `test_diff_preview.py` | diff 引擎（含末行无换行符的经典坑）、工具预览、预览在审批中真的被用上 |
 | `test_undo.py` | 快照语义、多步回退顺序、空步骤跳过、不可追踪操作的如实报告 |
