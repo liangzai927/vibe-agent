@@ -223,6 +223,18 @@ class TestSessionSync(AgentTestCase):
         self.assertFalse(session_sync.ensure_clone("").ok)
         self.assertFalse(session_sync.sync("").ok)
 
+    def test_empty_remote_explains_which_remote(self):
+        """「没配远端」这个提示一度让人以为在说项目代码的 git 远端。
+
+        其实这里说的是**会话记录**的远端——一个单独的仓库。
+        项目代码推没推、配没配 origin，和它没有任何关系。
+        提示必须把这一点说清楚，否则用户会去配错地方。
+        """
+        message = session_sync.sync("").describe()
+        self.assertIn("会话记录", message)
+        self.assertIn("两回事", message, "要点明和项目代码远端不是一回事")
+        self.assertIn("设置", message, "要告诉他去哪配")
+
     def test_bad_url_fails_without_leaving_junk(self):
         target = session_sync.remote_dir("/definitely/not/a/repo")
         result = session_sync.ensure_clone("/definitely/not/a/repo")

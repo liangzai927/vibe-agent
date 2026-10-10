@@ -89,7 +89,7 @@ def ensure_clone(url: str, *, timeout: int = DEFAULT_TIMEOUT, pull: bool = True)
     """
     url = (url or "").strip()
     if not url:
-        return SyncResult(False, detail="没填 git 地址")
+        return SyncResult(False, detail="没填 git 地址（会话记录用哪个仓库）")
 
     target = remote_dir(url)
     try:
@@ -134,7 +134,14 @@ def sync(url: str, *, message: str = SYNC_MESSAGE, timeout: int = DEFAULT_TIMEOU
     """
     url = (url or "").strip()
     if not url:
-        return SyncResult(False, detail="没配远端")
+        return SyncResult(
+            False,
+            detail=(
+                "还没配「会话记录」的远端。注意这和项目代码的 git 远端是两回事——"
+                "会话记录建议单独开一个仓库。在设置里把「会话保存位置」选成 "
+                "Git 仓库并填上地址即可。"
+            ),
+        )
 
     target = remote_dir(url)
     if not (target / ".git").is_dir():

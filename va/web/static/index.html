@@ -328,11 +328,14 @@
           <input type="text" id="set-session-remote"
                  placeholder="git@github.com:you/va-sessions.git">
           <div class="hint-inline">
-            填一个空仓库的地址（SSH 或 HTTPS 都行）。会话直接写进本地克隆，
-            点下面的「立即同步」才会推送——<strong>推送是外部可见的动作，不该自动做</strong>。
+            填一个<strong>空仓库</strong>的地址（SSH 或 HTTPS 都行）。<br>
+            这是<strong>对话记录</strong>的仓库，和你项目代码的 git 远端是两回事——
+            建议单独开一个（比如 <code>va-sessions</code>），别和代码混在一起。<br>
+            会话直接写进本地克隆，点「同步会话记录」才会推送——
+            <strong>推送是外部可见的动作，不该自动做</strong>。
           </div>
           <div class="row-after" style="margin-top:8px">
-            <button id="btn-sync">立即同步</button>
+            <button id="btn-sync">同步会话记录</button>
             <span id="sync-msg"></span>
           </div>
         </div>
@@ -1059,6 +1062,12 @@ async function openSettings() {
     $("set-auto-approve").checked = !!data.auto_approve;
     $("set-thinking").checked = !!data.show_thinking;
     $("set-env-path").textContent = data.env_path;
+
+    // 没配会话远端时，同步按钮点了也只会报错——直接禁掉并说明
+    const hasRemote = !!data.session_remote;
+    $("btn-sync").disabled = !hasRemote;
+    $("btn-sync").title = hasRemote ? "" : "先在上面填一个仓库地址";
+    if (!hasRemote) $("sync-msg").textContent = "（还没配远端）";
 
     if (!data.picker || !data.picker.available) {
       ["pick-session-dir", "pick-read-dir"].forEach((id) => {
