@@ -708,6 +708,11 @@ function handle(ev) {
     case "approval_done": break;
     case "task_end":      closeStream(); setStatus(false); break;
     case "model":         loadModels(); break;
+    case "settings":
+      // 别的标签页（或命令行）改了设置，这个标签页要跟着刷新——
+      // 否则你会看到一个和实际配置对不上的界面。
+      loadModels();
+      break;
   }
 }
 
@@ -1186,10 +1191,6 @@ $("btn-settings").addEventListener("click", openSettings);
 $("settings-close").addEventListener("click", closeSettings);
 $("settings-cancel").addEventListener("click", closeSettings);
 $("settings-save").addEventListener("click", saveSettings);
-$("set-session-reset").addEventListener("click", () => {
-  $("set-session-dir").value = "";
-  $("set-session-dir").placeholder = "留空 = " + (settingsCache?.session_dir_default || "默认位置");
-});
 $("settings").addEventListener("click", (e) => {
   if (e.target === $("settings")) closeSettings();   // 点遮罩关闭
 });
