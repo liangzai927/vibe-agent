@@ -16,7 +16,12 @@ from .llm import LLM
 from .loop import Agent
 from .plan import Plan
 from .prompts import build_system_prompt
-from .session import SessionDirError, SessionStore, git_head
+from .session import (
+    SessionDirError,
+    SessionStore,
+    git_head,
+    migrate_legacy_sessions,
+)
 from .tools import build_registry
 from .ui import UI
 from .util import bold, cyan, dim, green, red, yellow
@@ -239,6 +244,16 @@ def _open_session(
         return None, [], "", None
 
     root = workspace.root
+
+    # 项目里老位置（.va/sessions）可能攒了很多对话。配了数据仓库之后
+    # 如果不把它们搬过去，那些记录就变成孤儿了——本地看得见、
+    # git 里永远没有，用户会以为同步坏了。
+    try:
+        moved, note = migrate_legacy_sessions(root)
+        if note:
+            ui.warn(note)
+    except OSError as exc:
+        ui.warn(f"旧会话没能搬过去：{exc}")
 
     if args.resume:
         try:

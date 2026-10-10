@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -86,6 +87,48 @@ def git_head(workspace: Path) -> str | None:
     return (result.stdout or "").strip() or None
 
 
+def migrate_legacy_sessions(workspace: str | Path) -> tuple[int, str]:
+    """把项目里老位置的会话搬进当前该在的目录。
+
+    只在**当前目录不是老位置、而老位置确实有记录**时才动手。
+    返回 ``(搬了几个, 说明)``。
+
+    为什么需要它：老位置（``<项目>/.va/sessions``）里可能已经攒了很多对话。
+    配了数据仓库之后如果只是「不读它了」，那些记录就变成了孤儿——
+    本地看得见、git 里永远没有，用户会以为同步坏了。
+    """
+    workspace = Path(workspace).resolve()
+    legacy = SessionStore.legacy_dir(workspace)
+    target = SessionStore.default_dir(workspace)
+
+    if legacy == target or not legacy.is_dir():
+        return 0, ""
+
+    records = sorted(legacy.glob("*.jsonl"))
+    if not records:
+        return 0, ""
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return 0, f"建不出 {target}：{exc}"
+
+    moved = 0
+    for source in records:
+        destination = target / source.name
+        if destination.exists():
+            continue
+        try:
+            shutil.copy2(source, destination)
+            moved += 1
+        except OSError:
+            continue
+
+    if not moved:
+        return 0, ""
+    return moved, f"把 {moved} 条旧会话（来自 {legacy}）搬到了 {target}"
+
+
 class SessionStore:
     def __init__(self, path: Path, meta: SessionMeta) -> None:
         self.path = path
@@ -120,6 +163,12 @@ class SessionStore:
         override = os.environ.get("VA_SESSION_DIR", "").strip()
         if override:
             return Path(override).expanduser()
+
+        # **配了数据仓库就用仓库，优先级高于项目里的老位置。**
+        # 老位置只是「什么都没配」时的兜底——它盖过用户的显式选择，
+        # 就会出现「明明配了远端，会话还是写在项目里」这种最难查的状态。
+        if (os.environ.get("VA_DATA_REMOTE") or "").strip():
+            return sessions_dir(workspace)
 
         legacy = SessionStore.legacy_dir(workspace)
         try:

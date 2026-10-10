@@ -650,3 +650,127 @@ class TestSessionRebinding(AgentTestCase):
         store.append_message({"role": "assistant", "content": "新位置写的"})
 
         self.assertIn("新位置写的", store.path.read_text(encoding="utf-8"))
+
+
+class TestLegacySessionsAreAdopted(AgentTestCase):
+    """项目里老位置（``.va/sessions``）的会话要能进仓库。
+
+    这条是用户实际踩到的：他配好了远端，但会话一直在 ``<项目>/.va/sessions``
+    里——**老位置的优先级压过了数据仓库**，于是推送过去永远是空的。
+
+    两件事都要做对：
+      1. 配了仓库时，仓库优先于老位置
+      2. 老位置里已有的记录要搬过去，不能变成孤儿
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project = self.root / "proj"
+        self.legacy = self.project / ".va" / "sessions"
+        self.legacy.mkdir(parents=True)
+        for index in (1, 2, 3):
+            (self.legacy / f"2026010{index}-000000-aaaa.jsonl").write_text(
+                '{"type":"message"}\n', encoding="utf-8"
+            )
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+
+    def use_repo(self) -> None:
+        os.environ["VA_DATA_REMOTE"] = str(self.repo)
+        os.environ.pop("VA_SESSION_REMOTE", None)
+        os.environ.pop("VA_SESSION_DIR", None)
+        self.addCleanup(os.environ.pop, "VA_DATA_REMOTE", None)
+
+    def test_repo_wins_over_the_legacy_location(self):
+        """**这是根因**：老位置不该盖过用户显式配的仓库。"""
+        from va.session import SessionStore
+
+        os.environ.pop("VA_DATA_REMOTE", None)
+        os.environ.pop("VA_SESSION_REMOTE", None)
+        os.environ.pop("VA_SESSION_DIR", None)
+        without = SessionStore.default_dir(self.project)
+        self.assertEqual(without, self.legacy, "没配仓库时该继续用老位置")
+
+        self.use_repo()
+        with_repo = SessionStore.default_dir(self.project)
+        self.assertNotEqual(with_repo, self.legacy, "配了仓库还在用老位置")
+        self.assertIn("repo", str(with_repo))
+
+    def test_legacy_records_are_copied_into_the_repo(self):
+        from va.session import migrate_legacy_sessions
+
+        self.use_repo()
+        moved, note = migrate_legacy_sessions(self.project)
+
+        self.assertEqual(moved, 3)
+        self.assertIn("3 条", note)
+        # 数据根是**克隆目录**，不是那个 URL 本身
+        from va.session import SessionStore
+
+        target = SessionStore.default_dir(self.project)
+        sessions = list(target.glob("*.jsonl"))
+        self.assertEqual(len(sessions), 3)
+
+    def test_original_files_are_kept(self):
+        """只复制不删除——用户可能还想留着项目里那份。"""
+        from va.session import migrate_legacy_sessions
+
+        self.use_repo()
+        migrate_legacy_sessions(self.project)
+        self.assertEqual(len(list(self.legacy.glob("*.jsonl"))), 3)
+
+    def test_does_not_overwrite(self):
+        from va.session import SessionStore, migrate_legacy_sessions
+
+        self.use_repo()
+        target = SessionStore.default_dir(self.project)
+        target.mkdir(parents=True, exist_ok=True)
+        existing = target / "20260101-000000-aaaa.jsonl"
+        existing.write_text("远端已有的版本", encoding="utf-8")
+
+        moved, _ = migrate_legacy_sessions(self.project)
+
+        self.assertEqual(moved, 2, "已存在的那条不该被算作搬过去")
+        self.assertEqual(existing.read_text(encoding="utf-8"), "远端已有的版本")
+
+    def test_noop_when_there_is_nothing_to_move(self):
+        from va.session import migrate_legacy_sessions
+
+        self.use_repo()
+        import shutil as _shutil
+
+        _shutil.rmtree(self.legacy)
+        moved, note = migrate_legacy_sessions(self.project)
+        self.assertEqual((moved, note), (0, ""))
+
+    def test_noop_when_not_configured(self):
+        """没配仓库时不该乱搬——那会让老位置的记录突然消失。"""
+        from va.session import migrate_legacy_sessions
+
+        os.environ.pop("VA_DATA_REMOTE", None)
+        os.environ.pop("VA_SESSION_REMOTE", None)
+        os.environ.pop("VA_SESSION_DIR", None)
+        moved, _ = migrate_legacy_sessions(self.project)
+        self.assertEqual(moved, 0)
+
+    def test_end_to_end_legacy_records_reach_the_remote(self):
+        """完整链路：老位置 → 仓库 → 远端。用户要的就是这个。"""
+        origin = self.root / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+
+        os.environ["VA_DATA_REMOTE"] = str(origin)
+        os.environ.pop("VA_SESSION_REMOTE", None)
+        os.environ.pop("VA_SESSION_DIR", None)
+        self.addCleanup(os.environ.pop, "VA_DATA_REMOTE", None)
+
+        self.assertTrue(session_sync.ensure_clone(str(origin), kind="data").ok)
+        from va.session import migrate_legacy_sessions
+
+        migrate_legacy_sessions(self.project)
+        self.assertTrue(session_sync.sync(str(origin), kind="data").ok)
+
+        listing = subprocess.run(
+            ["git", "-c", "core.quotepath=false", "ls-tree", "-r", "--name-only", "HEAD"],
+            cwd=str(origin), capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(listing.count(".jsonl"), 3, f"远端没收到会话：{listing}")
