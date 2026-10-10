@@ -118,7 +118,8 @@ class TestChecks(AgentTestCase):
     def test_session_dir_ok(self):
         result = doctor.check_session_dir(self.cfg)
         self.assertEqual(result.status, doctor.OK)
-        self.assertIn(".va", result.detail)
+        # 会话现在默认在项目外（~/.vibe-agent/sessions/<项目名-哈希>/）
+        self.assertIn("sessions", result.detail)
 
     def test_git_present_on_this_machine(self):
         result = doctor.check_git()

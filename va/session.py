@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+from .paths import sessions_dir
 
 SESSION_DIR_NAME = Path(".va") / "sessions"
 FILE_MODE = 0o600
@@ -86,11 +87,56 @@ class SessionStore:
     # ------------------------------------------------------------ 创建/打开
 
     @staticmethod
+    def legacy_dir(workspace: Path) -> Path:
+        """旧位置：项目内的 .va/sessions。"""
+        return Path(workspace) / SESSION_DIR_NAME
+
+    @staticmethod
     def default_dir(workspace: Path) -> Path:
+        """会话存哪。
+
+        默认在项目之外（``~/.vibe-agent/sessions/<项目名-哈希>/``），
+        这样 ``git status`` 不会一直被会话文件弄脏。
+        ``VA_SESSION_DIR`` 可以把它们指到 git 仓库或同步盘里。
+
+        **旧位置里已经有会话的话就继续用它**——装作没看见等于把用户的
+        历史弄丢，而迁移这种事该由用户决定什么时候做。
+        """
         override = os.environ.get("VA_SESSION_DIR", "").strip()
         if override:
             return Path(override).expanduser()
-        return Path(workspace) / SESSION_DIR_NAME
+
+        legacy = SessionStore.legacy_dir(workspace)
+        try:
+            if legacy.is_dir() and any(legacy.glob("*.jsonl")):
+                return legacy
+        except OSError:
+            pass
+
+        return sessions_dir(workspace)
+
+    @staticmethod
+    def migration_hint(workspace: Path) -> str:
+        """还在用旧位置时给一句提示。空字符串表示不需要提示。"""
+        legacy = SessionStore.legacy_dir(workspace)
+        try:
+            count = len(list(legacy.glob("*.jsonl"))) if legacy.is_dir() else 0
+        except OSError:
+            return ""
+        if not count:
+            return ""
+        # 两边都 resolve，给出的命令才好直接复制粘贴——
+        # macOS 上 /tmp 和 /private/tmp 混着写看着很怪。
+        try:
+            target = sessions_dir(workspace).resolve()
+            source = legacy.resolve()
+        except (OSError, RuntimeError):
+            target, source = sessions_dir(workspace), legacy
+        return (
+            f"会话还在项目内的 {SESSION_DIR_NAME.as_posix()}/（{count} 个）。"
+            f"新会话默认写到项目外，想一起搬过去：\n"
+            f"    mkdir -p {target} && mv {source}/*.jsonl {target}/ && rmdir {source}"
+        )
 
     @classmethod
     def create(

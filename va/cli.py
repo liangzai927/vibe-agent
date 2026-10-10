@@ -260,18 +260,37 @@ def _open_session(
 
 
 def _warn_sessions_not_ignored(workspace: Workspace, ui: UI) -> None:
-    """确保 <workspace>/.va/ 被 git 忽略。
+    """会话落在项目内时，确保 .va/ 被 git 忽略；落在项目外则提示迁移。
 
-    图片、设计稿规格、截图现在都放在 agent 自己的目录下，不再进项目。
-    但会话记录还留在 ``.va/sessions``——它很小、纯文本，而且「这个项目的
-    对话历史」放在项目旁边更顺手。
+    新会话默认写到项目外（``~/.vibe-agent/sessions/<项目名-哈希>/``），
+    所以大多数情况下这里什么都不用做。
 
-    只是提醒不管用：用户会忘。既然我们知道自己建了这个目录，就顺手把
-    .gitignore 加好，并明确告诉用户改了什么。
+    只有「旧位置已经有历史」时才会走到加 .gitignore 那条路——那种情况下
+    继续用旧位置是刻意的（不能装作看不见用户的历史），顺手把 .gitignore
+    加好，并告诉他们怎么搬出去。
     """
     import subprocess
 
     root = workspace.root
+
+    # 会话已经在项目外了：没什么要忽略的，只提示怎么把老记录搬过去。
+    session_dir = SessionStore.default_dir(root)
+    try:
+        inside = session_dir.resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError):
+        inside = False
+    if not inside:
+        hint = SessionStore.migration_hint(root)
+        if hint:
+            ui.info(hint)
+        return
+
+    # 还在用旧位置。除了把 .gitignore 加好，也要告诉用户能搬出去——
+    # 不说的话他们会一直卡在这儿，而「为什么我的会话在项目里」是不该有的疑问。
+    hint = SessionStore.migration_hint(root)
+    if hint:
+        ui.info(hint)
+
     if not (root / ".git").exists():
         return
     try:

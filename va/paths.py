@@ -20,7 +20,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from pathlib import Path
 
 DEFAULT_HOME = "~/.vibe-agent"
@@ -29,8 +31,8 @@ INBOX_DIR = "inbox"
 DESIGNS_DIR = "designs"
 SCREENSHOTS_DIR = "screenshots"
 
-# 会话仍然跟着项目走
-SESSION_DIR = ".va/sessions"
+# 会话的旧位置（项目内）。为了不丢历史还认它，但新会话不再写这儿。
+LEGACY_SESSION_DIR = ".va/sessions"
 
 
 def agent_home() -> Path:
@@ -54,6 +56,36 @@ def screenshots_dir() -> Path:
 
 def diffs_dir() -> Path:
     return screenshots_dir() / "diffs"
+
+
+def project_slug(workspace: str | Path) -> str:
+    """给项目起一个又好认又不会撞的短名。
+
+    「目录名 + 路径哈希前缀」：目录名让人一眼认出是哪个项目，
+    哈希保证同名项目不打架——``~/work/api`` 和 ``~/personal/api``
+    是两个完全不同的项目，只按目录名存会搅在一起。
+    """
+    root = Path(workspace).expanduser().resolve()
+    name = root.name or "root"
+    # 去掉路径分隔符之类的危险字符，保留中文（项目名常是中文）
+    safe = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", name).strip("-.") or "project"
+    digest = hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:8]
+    return f"{safe}-{digest}"
+
+
+def sessions_dir(workspace: str | Path) -> Path:
+    """这个项目的会话存哪。
+
+    **默认在项目之外**（``~/.vibe-agent/sessions/<项目名-哈希>/``）。
+    会话是你和 agent 的对话记录，不是项目的一部分——放在项目里会让
+    ``git status`` 一直脏着，想备份还得单独配 .gitignore。
+
+    想让它们进 git 或同步盘，把 ``VA_SESSION_DIR`` 指过去就行。
+    """
+    override = (os.environ.get("VA_SESSION_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return agent_home() / "sessions" / project_slug(workspace)
 
 
 def _relative_to_home(path: Path) -> str | None:

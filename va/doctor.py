@@ -136,13 +136,22 @@ def check_workspace(workspace: Workspace) -> Result:
 def check_session_dir(cfg: Config) -> Result:
     directory = SessionStore.default_dir(cfg.workspace)
     ok, error = _writable(directory)
-    return Result(
-        "会话目录",
-        OK if ok else FAIL,
-        str(directory),
-        "" if ok else f"目录不可写：{error}",
-        REQUIRED,
-    )
+
+    # 说清楚在不在项目里。用户在 doctor 里最想知道的正是这个——
+    # 「我的会话到底存哪了，会不会把 git 弄脏」。
+    try:
+        inside = directory.resolve().is_relative_to(Path(cfg.workspace).resolve())
+    except (OSError, ValueError):
+        inside = False
+
+    if not ok:
+        hint = f"目录不可写：{error}"
+    elif inside:
+        hint = "在项目内（旧位置）。想搬到项目外：见 README「文件都放在哪」"
+    else:
+        hint = "在项目外，不会弄脏 git status"
+
+    return Result("会话目录", OK if ok else FAIL, str(directory), hint, REQUIRED)
 
 
 def check_git() -> Result:
