@@ -101,6 +101,8 @@ class Config:
     memory_remote: str = ""
     # 一个仓库放全部数据（记忆 + 各项目的会话），按项目分目录。推荐用这个。
     data_remote: str = ""
+    # 每轮回复结束后自动把记忆和会话同步上去。配了 data_remote 才有意义。
+    auto_sync: bool = False
     # ---- 视觉模型（用于「截图 vs 设计图」比对，可选）----
     # 主模型多数不支持图片（如 deepseek-chat），所以单独配一个多模态模型。
     vision_model: str = ""
@@ -192,6 +194,7 @@ class Config:
             memory_dir=(os.environ.get("VA_MEMORY_DIR") or "").strip(),
             memory_remote=(os.environ.get("VA_MEMORY_REMOTE") or "").strip(),
             data_remote=(os.environ.get("VA_DATA_REMOTE") or "").strip(),
+            auto_sync=(os.environ.get("VA_AUTO_SYNC") or "0").strip() in ("1", "true", "yes", "on"),
             vision_model=(os.environ.get("VA_VISION_MODEL") or "").strip(),
             vision_base_url=(os.environ.get("VA_VISION_BASE_URL") or "").strip(),
             vision_api_key=(os.environ.get("VA_VISION_API_KEY") or "").strip(),

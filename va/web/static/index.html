@@ -326,20 +326,29 @@
           <input type="text" id="set-session-remote"
                  placeholder="git@github.com:you/ai-memory.git">
           <div class="hint-inline">
-            填一个<strong>空仓库</strong>的地址（SSH 或 HTTPS 都行）。
+            填一个<strong>空白仓库</strong>的地址（SSH 或 HTTPS 都行）。
             这是<strong>记忆和会话记录</strong>的仓库，<strong>不是你这个项目代码的 git 地址</strong>
             ——代码该推哪儿还是推哪儿，两者互不相干。建议单独开一个
             （比如 <code>ai-memory</code>）。<br>
+            <strong>点下面的按钮会自动完成这些</strong>：
+            <ol id="setup-steps" style="margin:6px 0 6px 18px;padding:0;font-size:12px"></ol>
             仓库结构是固定的，<strong>先按项目分、项目下再分</strong>：
             <pre style="margin:6px 0;font-size:11.5px">memory/                             全局偏好（所有项目都读）
 projects/&lt;项目名-哈希&gt;/memory/        这个项目自己的偏好
 projects/&lt;项目名-哈希&gt;/sessions/      这个项目的对话记录</pre>
-            点「同步」才会推送——<strong>推送是外部可见的动作，不该自动做</strong>。
           </div>
           <div class="row-after" style="margin-top:8px">
-            <button id="btn-sync">同步</button>
+            <button class="primary" id="btn-sync">初始化并同步</button>
             <span id="sync-msg"></span>
           </div>
+          <div id="setup-result" style="display:none;margin-top:8px"></div>
+          <div style="display:none">
+          </div>
+          <label class="check-row" style="margin-top:10px">
+            <input type="checkbox" id="auto-sync">
+            <span>每次回复后自动同步</span>
+          </label>
+
         </div>
       </div>
 
@@ -1045,14 +1054,11 @@ async function browseFolder(prompt) {
   }
 }
 
-async function openSettings() {
-  $("set-msg").textContent = "";
-  $("sync-msg").textContent = "";
-  $("set-restart").style.display = "none";
-  $("settings").classList.add("on");
-  try {
-    const data = await fetch("/api/settings").then((r) => r.json());
-    settingsCache = data;
+function applySettings(data) {
+  // 渲染设置面板。**单独抽出来**是因为初始化仓库之后要就地刷新面板，
+  // 而那时不该再发一次请求（openSettings 会重新 fetch）。
+  settingsCache = data;
+
 
     const isRemote = !!data.data_remote;
     setRadio("sess-mode", isRemote ? "remote" : "local");
@@ -1085,8 +1091,18 @@ async function openSettings() {
 
     // 没配会话远端时，同步按钮点了也只会报错——直接禁掉并说明
     const hasRemote = !!data.data_remote;
-    $("btn-sync").disabled = !hasRemote;
-    $("btn-sync").title = hasRemote ? "" : "先在上面填一个仓库地址";
+    // 按钮的可用性跟着**输入框**走，而不是已保存的配置——
+    // 用户刚粘了个地址却发现按钮是灰的，谁都会以为坏了。
+    const typed = $("set-session-remote").value.trim();
+    const ready = hasRemote || !!typed;
+    $("btn-sync").disabled = !ready;
+    $("btn-sync").textContent = hasRemote ? "立即同步" : "初始化并同步";
+    $("btn-sync").title = ready ? "" : "先在上面填一个仓库地址";
+    $("auto-sync").checked = !!data.auto_sync;
+    $("setup-steps").innerHTML = (data.data_repo_steps || [])
+      .map((st) => `<li><b>${escapeHtml(st.title)}</b> —— ${escapeHtml(st.detail)}</li>`)
+      .join("");
+    $("auto-sync").disabled = !hasRemote;
     if (!hasRemote) $("sync-msg").textContent = "（还没配远端）";
 
     if (!data.picker || !data.picker.available) {
@@ -1103,8 +1119,17 @@ async function openSettings() {
         "已有的记录不会自动搬走——想一起搬，用命令行 <code>mv</code> 一下。";
     }
     syncVisibility();
+}
+
+async function openSettings() {
+  $("set-msg").textContent = "";
+  $("sync-msg").textContent = "";
+  $("set-restart").style.display = "none";
+  $("settings").classList.add("on");
+  try {
+    applySettings(await fetch("/api/settings").then((r) => r.json()));
   } catch (err) {
-    $("set-msg").textContent = "读取设置失败：" + err;
+    $("set-msg").textContent = "读设置失败：" + err;
   }
 }
 
@@ -1166,19 +1191,102 @@ async function saveSettings() {
   }
 }
 
+function renderSteps(steps) {
+  const box = $("setup-result");
+  if (!steps.length) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "block";
+  box.innerHTML = steps
+    .map((s) => {
+      const mark = s.ok ? "✓" : "✗";
+      const colour = s.ok ? "var(--green)" : "var(--red)";
+      return `<div style="font-size:12px;margin:3px 0">
+        <span style="color:${colour}">${mark}</span>
+        <b>${escapeHtml(s.title)}</b>${s.detail ? " —— " + escapeHtml(s.detail) : ""}
+      </div>`;
+    })
+    .join("");
+}
+
 async function syncSessions() {
   const button = $("btn-sync");
+  const msg = $("sync-msg");
+  const typed = $("set-session-remote").value.trim();
+  const saved = !!(settingsCache && settingsCache.data_remote);
+
+  // 还没配过 → 走初始化流程（确认空白 → 建结构 → 首次提交 → 推送）
+  if (!saved) {
+    if (!typed) {
+      msg.textContent = "✗ 先填一个空白仓库的地址";
+      return;
+    }
+    if (!confirm(
+      "会在 " + typed + " 上做这些事：\n\n" +
+      "1. 确认它是空白仓库（不是就中断）\n" +
+      "2. 建好 memory/ 和 projects/ 目录\n" +
+      "3. 首次提交并推送\n\n继续吗？"
+    )) return;
+
+    button.disabled = true;
+    msg.textContent = "正在确认远端…";
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ setup_data_repo: true, url: typed }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        msg.textContent = "✗ " + (data.error || "初始化失败");
+        // 失败时把每一步的结果都列出来，用户才知道卡在哪一步
+        renderSteps(data.steps || []);
+        button.disabled = false;
+        return;
+      }
+      msg.textContent = "✓ " + (data.message || "初始化完成");
+      renderSteps(data.steps || []);
+      if (data.settings) applySettings(data.settings);
+      $("auto-sync").checked = true;
+      button.disabled = false;
+    } catch (err) {
+      msg.textContent = "✗ " + err;
+      button.disabled = false;
+    }
+    return;
+  }
+
+  // 已配好 → 普通同步
   button.disabled = true;
-  $("sync-msg").textContent = "同步中…";
+  msg.textContent = "同步中…";
   try {
     const res = await fetch("/api/session-sync", { method: "POST" });
     const data = await res.json();
-    $("sync-msg").textContent = (data.ok ? "✓ " : "✗ ") + data.message;
+    msg.textContent = (data.ok ? "✓ " : "✗ ") + data.message;
+  } catch (err) {
+    msg.textContent = "✗ " + err;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// 自动同步开关
+$("auto-sync").addEventListener("change", async (e) => {
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_sync: e.target.checked }),
+    });
+    const data = await res.json();
+    $("sync-msg").textContent = data.ok
+      ? (e.target.checked ? "✓ 以后每次回复都会自动同步" : "✓ 已关闭自动同步")
+      : "✗ " + (data.error || "保存失败");
   } catch (err) {
     $("sync-msg").textContent = "✗ " + err;
   }
-  button.disabled = false;
-}
+});
 
 document.querySelectorAll('input[name="sess-mode"], input[name="read-scope"]')
   .forEach((el) => el.addEventListener("change", syncVisibility));
@@ -1209,6 +1317,11 @@ $("add-read-dir").addEventListener("click", () => {
 
 $("btn-sync").addEventListener("click", syncSessions);
 
+$("set-session-remote").addEventListener("input", () => {
+  const typed = $("set-session-remote").value.trim();
+  const saved = !!(settingsCache && settingsCache.data_remote);
+  $("btn-sync").disabled = !(saved || typed);
+});
 $("set-session-dir").addEventListener("input", (e) => {
   const raw = e.target.value.trim();
   $("set-session-resolved").textContent =

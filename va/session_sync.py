@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,6 +74,137 @@ def _git(args: list[str], cwd: Path | None = None, timeout: int = DEFAULT_TIMEOU
         errors="replace",
         timeout=timeout,
     )
+
+
+# --------------------------------------------------------------- 初始化空仓库
+
+INIT_README = """# {name}
+
+这个仓库由 [vibe-agent](https://github.com/liangzai927/vibe-agent) 自动创建，
+用来在多台机器之间同步**记忆**和**会话记录**。
+
+## 结构
+
+```
+memory/                             全局偏好——所有项目都读
+projects/<项目名-哈希>/memory/        这个项目自己的偏好
+projects/<项目名-哈希>/sessions/      这个项目的对话记录
+```
+
+目录名里的哈希来自项目的绝对路径，所以两个同名的项目不会撞。
+
+## 注意
+
+这里是**对话记录**。别把项目代码推到这个仓库里——两者互不相干。
+"""
+
+
+def remote_is_empty(url: str, *, timeout: int = DEFAULT_TIMEOUT) -> tuple[bool, str]:
+    """远端是不是一个**空白**仓库。
+
+    返回 ``(是否空白, 不是空白的原因)``。连不上或没权限时也算「不是空白」，
+    但原因不同——调用方直接把原因给用户看。
+    """
+    url = (url or "").strip()
+    if not url:
+        return False, "没填地址"
+
+    result = _git(["ls-remote", "--heads", url], timeout=timeout)
+    if result.returncode != 0:
+        return False, _explain(result.stderr)
+    if result.stdout.strip():
+        return False, "这个仓库里已经有分支了"
+    return True, ""
+
+
+def _git_commit(target: Path, message: str) -> "subprocess.CompletedProcess":
+    """提交。带上身份兜底——容器和 CI 里常常没有全局 gitconfig。"""
+    return _git(
+        [
+            "-c", "user.name=vibe-agent",
+            "-c", "user.email=vibe-agent@localhost",
+            "commit", "-m", message,
+        ],
+        cwd=target,
+    )
+
+
+def bootstrap(url: str, *, kind: str = "data", timeout: int = DEFAULT_TIMEOUT) -> SyncResult:
+    """把一个**空白**仓库初始化成数据仓库。
+
+    流程（和用户在 GitHub 上看到的指引等价，只是内容换成了数据仓库该有的）：
+
+        1. 确认远端是空白的——不是就中断，绝不动已有内容的仓库
+        2. 克隆下来（顺带验证地址和权限）
+        3. 建 README + memory/ + projects/
+        4. 首次提交并推送，设置 upstream
+
+    **第 1 步是硬性的。** 往一个已经有东西的仓库里塞提交是有破坏性的，
+    宁可让用户换一个空白仓库。
+    """
+    url = (url or "").strip()
+    if not url:
+        return SyncResult(False, detail="没填 git 地址")
+
+    empty, why = remote_is_empty(url, timeout=timeout)
+    if not empty:
+        return SyncResult(
+            False,
+            detail=(
+                f"这个仓库不能用作数据仓库：{why}。\n"
+                f"请换一个**空白仓库**——记忆和会话会写进去，"
+                f"混在已有内容里既乱又危险。"
+            ),
+        )
+
+    target = remote_dir(url, kind=kind)
+
+    # 之前可能留下过一个失败的克隆，清掉重来
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return SyncResult(False, detail=f"建不出目录 {target.parent}：{exc}")
+
+    clone = _git(["clone", url, str(target)], timeout=timeout)
+    if clone.returncode != 0:
+        shutil.rmtree(target, ignore_errors=True)
+        return SyncResult(False, detail=f"克隆失败：{_explain(clone.stderr)}")
+
+    # 建结构。README 用仓库名当标题，和用户自己敲的那套一致。
+    name = _slug_from_url(url)
+    (target / "README.md").write_text(INIT_README.format(name=name), encoding="utf-8")
+    (target / "memory").mkdir(exist_ok=True)
+    (target / "projects").mkdir(exist_ok=True)
+
+    add = _git(["add", "-A"], cwd=target)
+    if add.returncode != 0:
+        return SyncResult(False, detail=f"暂存失败：{_explain(add.stderr)}")
+
+    commit = _git_commit(target, "chore: 初始化记忆仓库")
+    if commit.returncode != 0:
+        # 空仓库克隆下来不会有 commit，正常不会走到这里
+        return SyncResult(False, detail=f"首次提交失败：{_explain(commit.stderr)}")
+
+    push = _git(["push", "-u", "origin", _default_branch(target)], cwd=target, timeout=timeout)
+    if push.returncode != 0:
+        return SyncResult(
+            False,
+            detail=(
+                f"初始化好了，但推送失败：{_explain(push.stderr)}\n"
+                f"配置已经写下，网络恢复后点「同步」即可。"
+            ),
+        )
+
+    return SyncResult(True, message=f"已初始化 {name}，记忆和会话会同步到这里")
+
+
+def _default_branch(target: Path) -> str:
+    """当前分支名。新克隆一般是 main 或 master，取实际的那个。"""
+    result = _git(["symbolic-ref", "--short", "-q", "HEAD"], cwd=target)
+    branch = result.stdout.strip() if result.returncode == 0 else ""
+    return branch or "main"
 
 
 def ensure_clone(

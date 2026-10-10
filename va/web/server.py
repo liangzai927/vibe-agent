@@ -102,6 +102,7 @@ class WebApp:
 
     def settings(self) -> dict[str, Any]:
         """当前设置。**绝不返回 api_key**——这东西会发到浏览器。"""
+        from ..data_repo import describe_steps as data_repo_steps
         from ..memory import stats as memory_stats
         from ..paths import agent_home, data_root, describe
 
@@ -125,6 +126,8 @@ class WebApp:
             "read_scope": self.workspace.read_scope,
             "session_remote": self.cfg.session_remote,
             "data_remote": self.cfg.data_remote,
+            "auto_sync": self.cfg.auto_sync,
+            "data_repo_steps": data_repo_steps(),
             "data_root": describe(data_root()),
             "memory": memory_stats(self.workspace.root),
             "picker": self._picker_status(),
@@ -175,6 +178,59 @@ class WebApp:
                 os.environ.pop("VA_SESSION_DIR", None)
                 notes.append("已恢复默认位置（项目外）")
             changed.append("session_dir")
+
+        # ---- 初始化记忆仓库：整个工作流在 va/data_repo.py 里，这里只调它 ----
+        if payload.get("setup_data_repo"):
+            from ..data_repo import run as run_setup
+
+            url = str(payload.get("url") or "").strip()
+            outcome = run_setup(url)
+            if not outcome.ok:
+                # 失败就不写配置——不然会变成「配了远端但数据还在本地」
+                return {
+                    "ok": False,
+                    "error": outcome.describe(),
+                    "steps": [
+                        {"key": s.key, "title": s.title, "ok": s.ok, "detail": s.detail}
+                        for s in outcome.steps
+                    ],
+                }
+
+            values["VA_DATA_REMOTE"] = url
+            os.environ["VA_DATA_REMOTE"] = url
+            for key in ("VA_SESSION_REMOTE", "VA_SESSION_DIR"):
+                values[key] = ""
+                os.environ.pop(key, None)
+            # 初始化成功后默认打开自动同步——用户要的就是「以后每次都自动存」
+            values["VA_AUTO_SYNC"] = "1"
+            os.environ["VA_AUTO_SYNC"] = "1"
+            self.cfg.auto_sync = True
+            self.cfg.data_remote = url
+            changed.extend(["data_remote", "auto_sync"])
+            # **必须先落盘再返回**：这个分支以前直接 return，
+            # 跳过了后面统一的写 .env 步骤——结果是仓库初始化成功、
+            # 配置却没保存，重启后 data_remote 又是空的，自动同步永远不触发。
+            try:
+                write_env_values(self.env_path, values)
+            except OSError as exc:
+                return {"ok": False, "error": f"仓库初始化好了，但配置写不进 {self.env_path}：{exc}"}
+
+            return {
+                "ok": True,
+                "message": outcome.message,
+                "steps": [
+                    {"key": s.key, "title": s.title, "ok": s.ok, "detail": s.detail}
+                    for s in outcome.steps
+                ],
+                "settings": self.settings(),
+            }
+
+        if "auto_sync" in payload:
+            on = bool(payload["auto_sync"])
+            values["VA_AUTO_SYNC"] = "1" if on else "0"
+            os.environ["VA_AUTO_SYNC"] = "1" if on else "0"
+            self.cfg.auto_sync = on
+            changed.append("auto_sync")
 
         # ---- 数据仓库（一个仓库放全部数据）----
         if "data_remote" in payload:
@@ -370,6 +426,36 @@ class WebApp:
                 )
                 answer = ""
             self.bus.publish("task_end", answer=answer or "")
+
+            # 回复结束 → 自动同步（后台线程，不阻塞界面）
+            self.auto_sync_now()
+
+    def auto_sync_now(self) -> None:
+        """回复结束后自动同步一次。
+
+        放在**后台线程**里：推送可能要几秒，不能让用户干等。
+        失败只记一条提示，不打断对话——同步失败不该影响正在做的事。
+        """
+        from ..data_repo import auto_sync_enabled, sync_now
+
+        if not auto_sync_enabled(self.cfg):
+            return
+
+        def work() -> None:
+            try:
+                result = sync_now(self.cfg)
+                if result.ok:
+                    self.bus.publish("note", level="info", text="已自动同步到记忆仓库")
+                else:
+                    self.bus.publish(
+                        "note",
+                        level="warn",
+                        text=f"自动同步失败（不影响使用）：{result.describe()}",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.bus.publish("note", level="warn", text=f"自动同步出错：{exc}")
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------- 命令
 
