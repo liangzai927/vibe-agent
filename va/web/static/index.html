@@ -140,6 +140,54 @@
   .approval.resolved { opacity: .6; }
   .approval .verdict { margin-top: 10px; font-size: 13px; }
 
+  /* 设置面板 */
+  .overlay {
+    position: fixed; inset: 0; background: #0009; z-index: 60;
+    display: none; align-items: flex-start; justify-content: center;
+    padding: 48px 16px; overflow-y: auto; backdrop-filter: blur(2px);
+  }
+  .overlay.on { display: flex; }
+  .sheet {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    width: min(680px, 100%); box-shadow: 0 12px 40px #0008;
+  }
+  .sheet header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+    background: none; position: static;
+  }
+  .sheet header h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .sheet .body { padding: 16px 18px; }
+  .sheet footer {
+    display: flex; gap: 10px; justify-content: flex-end; align-items: center;
+    padding: 14px 18px; border-top: 1px solid var(--border); background: none;
+  }
+  .field { margin-bottom: 18px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+  .field .desc { color: var(--muted); font-size: 12px; margin-bottom: 7px; line-height: 1.5; }
+  .field input[type=text], .field textarea {
+    width: 100%; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font: inherit; font-size: 13px;
+    padding: 7px 10px; font-family: var(--mono); outline: none;
+  }
+  .field input[type=text]:focus, .field textarea:focus { border-color: var(--accent); }
+  .field textarea { resize: vertical; min-height: 62px; }
+  .field .row-after {
+    display: flex; align-items: center; gap: 10px; margin-top: 6px;
+    color: var(--muted); font-size: 12px; flex-wrap: wrap;
+  }
+  .field .row-after code { color: var(--green); }
+  .check { display: flex; align-items: flex-start; gap: 9px; margin-bottom: 14px; }
+  .check input { margin-top: 3px; }
+  .check .t { font-size: 13px; font-weight: 600; }
+  .check .d { color: var(--muted); font-size: 12px; }
+  .restart {
+    color: var(--yellow); background: #d2992212; border: 1px solid #5c4a1a;
+    border-radius: 6px; padding: 8px 11px; font-size: 12.5px; margin-top: 14px;
+  }
+  .restart ul { margin: 5px 0 0; padding-left: 18px; }
+
   /* 拖拽 */
   #drop {
     position: fixed; inset: 0; background: #1f6feb22; border: 3px dashed var(--accent);
@@ -190,6 +238,7 @@
     <select id="model"></select>
   </label>
   <div class="pill" id="status">连接中…</div>
+  <button id="btn-settings" title="设置">⚙ 设置</button>
   <button id="btn-help" title="显示命令">/help</button>
 </header>
 
@@ -216,6 +265,77 @@
     </div>
   </div>
 </footer>
+
+<div class="overlay" id="settings">
+  <div class="sheet">
+    <header>
+      <h3>设置</h3>
+      <div class="spacer"></div>
+      <button id="settings-close">关闭</button>
+    </header>
+    <div class="body">
+
+      <div class="field">
+        <label>会话保存位置</label>
+        <div class="desc">
+          一个会话一个 <code>.jsonl</code>。放在项目里会一直弄脏 git status，
+          所以默认在项目外。想让记录进 git 或同步盘，指到那个目录就行。
+        </div>
+        <input type="text" id="set-session-dir" placeholder="留空 = 用默认位置">
+        <div class="row-after">
+          <span>当前解析为 <code id="set-session-resolved"></code></span>
+          <button id="set-session-reset">恢复默认</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>允许读取的工作区外目录</label>
+        <div class="desc">
+          一行一个。列在这里的目录，读图片/文档时不再逐次询问。
+          <strong>改完要重启服务才生效。</strong>
+        </div>
+        <textarea id="set-read-dirs" placeholder="~/Desktop&#10;~/Downloads"></textarea>
+      </div>
+
+      <div class="field">
+        <label>视觉模型</label>
+        <div class="desc">
+          用来读懂设计图上的文字和语义。留空的话，主模型自己能读图就沿用主模型。
+          可以在 <code>/models</code> 里看哪些标着「可读图」。
+        </div>
+        <input type="text" id="set-vision" placeholder="留空 = 自动">
+      </div>
+
+      <div class="check">
+        <input type="checkbox" id="set-auto-approve">
+        <label for="set-auto-approve">
+          <span class="t">自动批准所有操作</span><br>
+          <span class="d">不再逐次询问。赶时间时用，但它会直接改文件和执行命令。</span>
+        </label>
+      </div>
+
+      <div class="check">
+        <input type="checkbox" id="set-thinking">
+        <label for="set-thinking">
+          <span class="t">显示思考过程</span><br>
+          <span class="d">关掉可以让界面清爽些，不影响结果。</span>
+        </label>
+      </div>
+
+      <div class="restart" id="set-restart" style="display:none"></div>
+      <div class="row-after" style="margin-top:14px">
+        <span>配置文件 <code id="set-env-path"></code></span>
+      </div>
+
+    </div>
+    <footer>
+      <span class="meta" id="set-msg"></span>
+      <div class="spacer"></div>
+      <button id="settings-cancel">取消</button>
+      <button class="primary" id="settings-save">保存</button>
+    </footer>
+  </div>
+</div>
 
 <div id="drop">松手即可上传图片</div>
 
@@ -736,6 +856,120 @@ input.addEventListener("paste", (e) => {
     const file = image.getAsFile();
     if (file) upload(file);
   }
+});
+
+// ---------------------------------------------------------------- 设置
+
+let settingsCache = null;
+
+async function openSettings() {
+  $("set-msg").textContent = "";
+  $("set-restart").style.display = "none";
+  $("settings").classList.add("on");
+  try {
+    const data = await fetch("/api/settings").then((r) => r.json());
+    settingsCache = data;
+
+    // 会话位置：默认位置不写进输入框（留空即默认），否则下次打开会以为是自定义的
+    const isDefault = data.session_dir_display === data.session_dir_default;
+    $("set-session-dir").value = isDefault ? "" : data.session_dir;
+    $("set-session-dir").placeholder = "留空 = " + data.session_dir_default;
+    $("set-session-resolved").textContent = data.session_dir_display;
+
+    $("set-read-dirs").value = (data.read_dirs || []).join("\n");
+    $("set-vision").value = data.vision_model || "";
+    $("set-auto-approve").checked = !!data.auto_approve;
+    $("set-thinking").checked = !!data.show_thinking;
+    $("set-env-path").textContent = data.env_path;
+
+    if (data.session_dir_is_legacy) {
+      const box = $("set-restart");
+      box.style.display = "block";
+      box.innerHTML =
+        "会话还在项目内的 <code>.va/sessions/</code>。改成上面的默认位置就会搬到项目外，" +
+        "已有的记录不会自动搬走——想一起搬，用命令行 <code>mv</code> 一下。";
+    }
+  } catch (err) {
+    $("set-msg").textContent = "读取设置失败：" + err;
+  }
+}
+
+function closeSettings() {
+  $("settings").classList.remove("on");
+}
+
+async function saveSettings() {
+  const button = $("settings-save");
+  button.disabled = true;
+  $("set-msg").textContent = "保存中…";
+
+  const readDirs = $("set-read-dirs").value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const payload = {
+    session_dir: $("set-session-dir").value.trim(),
+    read_dirs: readDirs,
+    vision_model: $("set-vision").value.trim(),
+    auto_approve: $("set-auto-approve").checked,
+    show_thinking: $("set-thinking").checked,
+  };
+
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      $("set-msg").textContent = "";
+      $("set-restart").style.display = "block";
+      $("set-restart").textContent = "✗ " + (data.error || "保存失败");
+      button.disabled = false;
+      return;
+    }
+    if (data.restart && data.restart.length) {
+      $("set-restart").style.display = "block";
+      $("set-restart").innerHTML =
+        "已保存。下面这些<strong>要重启服务才生效</strong>：<ul>" +
+        data.restart.map((item) => `<li>${escapeHtml(item)}</li>`).join("") +
+        "</ul>";
+      $("set-msg").textContent = "部分已生效";
+    } else {
+      $("set-restart").style.display = "none";
+      $("set-msg").textContent = "已保存";
+    }
+    (data.notes || []).forEach((note) => pushNote("success", note));
+    if ((data.changed || []).includes("vision_model")) loadModels();
+    button.disabled = false;
+  } catch (err) {
+    $("set-msg").textContent = "保存失败：" + err;
+    button.disabled = false;
+  }
+}
+
+$("btn-settings").addEventListener("click", openSettings);
+$("settings-close").addEventListener("click", closeSettings);
+$("settings-cancel").addEventListener("click", closeSettings);
+$("settings-save").addEventListener("click", saveSettings);
+$("set-session-reset").addEventListener("click", () => {
+  $("set-session-dir").value = "";
+  $("set-session-dir").placeholder = "留空 = " + (settingsCache?.session_dir_default || "默认位置");
+});
+$("settings").addEventListener("click", (e) => {
+  if (e.target === $("settings")) closeSettings();   // 点遮罩关闭
+});
+// 会话位置输入时实时显示解析结果，不用等保存才知道对不对
+$("set-session-dir").addEventListener("input", (e) => {
+  const raw = e.target.value.trim();
+  $("set-session-resolved").textContent =
+    raw || settingsCache?.session_dir_default || "";
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("settings").classList.contains("on")) closeSettings();
 });
 
 // ---------------------------------------------------------------- 启动

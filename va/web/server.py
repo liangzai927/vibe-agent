@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import socket
 import threading
 import time
@@ -27,7 +28,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ..clipboard import default_filename, inbox_dir
-from ..config import Config
+from ..paths import project_slug
+from ..session import SessionStore
+from ..config import Config, replace
 from ..loop import Agent
 from ..util import strip_ansi
 from ..workspace import Workspace
@@ -94,6 +97,118 @@ class WebApp:
         # 和 env_path 一样可以重定向。测试必须能把这些指到临时目录去——
         # 不然「跑一次测试」就会把开发者真实的配置和模型缓存冲掉。
         self.models_dir = models_dir or AGENT_DIR
+
+    # ------------------------------------------------------------- 设置
+
+    def settings(self) -> dict[str, Any]:
+        """当前设置。**绝不返回 api_key**——这东西会发到浏览器。"""
+        from ..paths import agent_home, describe
+
+        session_dir = SessionStore.default_dir(self.workspace.root)
+        try:
+            legacy = (
+                SessionStore.legacy_dir(self.workspace.root).resolve()
+                == Path(session_dir).resolve()
+            )
+        except (OSError, ValueError):
+            legacy = False
+
+        return {
+            "session_dir": str(session_dir),
+            "session_dir_display": describe(Path(session_dir)),
+            "session_dir_is_legacy": legacy,
+            "session_dir_default": describe(
+                agent_home() / "sessions" / project_slug(self.workspace.root)
+            ),
+            "read_dirs": [str(d) for d in self.workspace.extra_read_roots if d != self.workspace.home],
+            "home": str(self.workspace.home),
+            "home_display": describe(self.workspace.home),
+            "vision_model": self.cfg.vision_model,
+            "auto_approve": self.ui.auto_approve,
+            "show_thinking": self.cfg.show_thinking,
+            "env_path": str(self.env_path),
+        }
+
+    def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """校验 → 写 .env → 热应用能应用的。返回改了什么、哪些要重启。"""
+        from ..config import write_env_values
+
+        values: dict[str, str] = {}
+        changed: list[str] = []
+        restart: list[str] = []
+        notes: list[str] = []
+
+        # ---- 会话保存位置 ----
+        if "session_dir" in payload:
+            raw = str(payload["session_dir"] or "").strip()
+            if raw:
+                target = Path(raw).expanduser()
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                    if not os.access(target, os.W_OK):
+                        return {"ok": False, "error": f"目录不可写：{target}"}
+                except OSError as exc:
+                    return {"ok": False, "error": f"建不了这个目录：{exc}"}
+                values["VA_SESSION_DIR"] = raw
+                # SessionStore.default_dir 每次都读环境变量，所以新会话立刻生效
+                os.environ["VA_SESSION_DIR"] = str(target)
+                notes.append(f"新会话将保存到 {target}")
+            else:
+                values["VA_SESSION_DIR"] = ""
+                os.environ.pop("VA_SESSION_DIR", None)
+                notes.append("已恢复默认位置（项目外）")
+            changed.append("session_dir")
+
+        # ---- 外部可读目录 ----
+        if "read_dirs" in payload:
+            entries = [
+                str(item).strip()
+                for item in (payload["read_dirs"] or [])
+                if str(item).strip()
+            ]
+            for entry in entries:
+                resolved = Path(entry).expanduser()
+                if not resolved.is_dir():
+                    return {"ok": False, "error": f"不是有效目录：{entry}"}
+            values["VA_READ_DIRS"] = os.pathsep.join(entries)
+            changed.append("read_dirs")
+            restart.append("可读目录（工作区已经建好了，要重启才认）")
+
+        # ---- 视觉模型：能热生效 ----
+        if "vision_model" in payload:
+            vision = str(payload["vision_model"] or "").strip()
+            values["VA_VISION_MODEL"] = vision
+            os.environ["VA_VISION_MODEL"] = vision
+            self.cfg = replace(self.cfg, vision_model=vision)
+            self.agent.cfg = self.cfg
+            if hasattr(self.agent, "agent_ctx"):
+                self.agent.agent_ctx.cfg = self.cfg
+            changed.append("vision_model")
+
+        # ---- 自动批准 / 思考过程：能热生效 ----
+        if "auto_approve" in payload:
+            flag = bool(payload["auto_approve"])
+            values["VA_AUTO_APPROVE"] = "1" if flag else "0"
+            os.environ["VA_AUTO_APPROVE"] = "1" if flag else "0"
+            self.ui.auto_approve = flag
+            changed.append("auto_approve")
+
+        if "show_thinking" in payload:
+            flag = bool(payload["show_thinking"])
+            values["VA_SHOW_THINKING"] = "1" if flag else "0"
+            os.environ["VA_SHOW_THINKING"] = "1" if flag else "0"
+            self.cfg = replace(self.cfg, show_thinking=flag)
+            self.ui.show_thinking = flag
+            changed.append("show_thinking")
+
+        if values:
+            try:
+                write_env_values(self.env_path, values)
+            except OSError as exc:
+                return {"ok": False, "error": f"写不进 {self.env_path}：{exc}"}
+
+        self.bus.publish("settings", changed=changed, restart=restart, notes=notes)
+        return {"ok": True, "changed": changed, "restart": restart, "notes": notes}
 
     # ------------------------------------------------------------- 模型
 
@@ -331,6 +446,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/state":
             self._json(self.app.state())
             return
+        if parsed.path == "/api/settings":
+            self._json(self.app.settings())
+            return
+
         if parsed.path == "/api/models":
             self._json(self.app.models())
             return
@@ -409,6 +528,12 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._body()
             ok, message = self.app.submit(str(payload.get("text", "")))
             self._json({"ok": ok, "message": message}, 200 if ok else 409)
+            return
+
+        if parsed.path == "/api/settings":
+            payload = self._body()
+            result = self.app.update_settings(payload)
+            self._json(result, 200 if result.get("ok") else 400)
             return
 
         if parsed.path == "/api/model":

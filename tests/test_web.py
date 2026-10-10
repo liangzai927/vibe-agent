@@ -10,6 +10,7 @@ ScriptedLLM，不会产生任何 API 调用。
 
 from __future__ import annotations
 
+import os
 import json
 import sys
 import threading
@@ -734,6 +735,144 @@ class TestModelSwitching(AgentTestCase):
     def test_switch_goes_through_the_slash_command_too(self):
         self.app.submit("/model via-command")
         self.assertEqual(self.app.agent.cfg.model, "via-command")
+
+
+class TestSettings(AgentTestCase):
+    """设置面板的后端。
+
+    界面上改配置而不是让人去翻 .env。这里盯三件事：
+    校验不能糊弄（无效路径必须在写盘前被拦）、密钥绝不能发到浏览器、
+    以及**哪些改动能热生效、哪些必须重启**要说清楚。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.env_path = self.root / ".env"
+        self.env_path.write_text("VA_API_KEY=sk-secret\n", encoding="utf-8")
+        self.app = WebApp(
+            self.cfg,
+            self.workspace,
+            llm=ScriptedLLM(turn("x")),
+            registry=build_registry(self.workspace),
+            env_path=self.env_path,
+        )
+        self.server = ServerFixture(self.app)
+
+    def tearDown(self) -> None:
+        self.server.stop()
+        os.environ.pop("VA_SESSION_DIR", None)
+        super().tearDown()
+
+    def read_env(self) -> str:
+        return self.env_path.read_text(encoding="utf-8")
+
+    def post_expecting_error(self, payload: dict) -> tuple[int, dict]:
+        """发一个预期会被拒的请求，把状态码和错误体都拿回来。
+
+        不改 ServerFixture.post：别的测试靠它抛 HTTPError 来断言拒绝，
+        改了会把那些测试变成永远通过。
+        """
+        try:
+            return self.server.post("/api/settings", payload)
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    # ---------------------------------------------------------- 读
+
+    def test_settings_reports_the_fields_the_panel_needs(self):
+        status, body, _ = self.server.get("/api/settings")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        for key in (
+            "session_dir", "session_dir_display", "session_dir_default",
+            "read_dirs", "home", "vision_model", "auto_approve",
+            "show_thinking", "env_path",
+        ):
+            self.assertIn(key, data, f"设置里少了 {key}")
+
+    def test_settings_never_leaks_the_api_key(self):
+        """这个接口会把内容发到浏览器，密钥一个字都不能出现。"""
+        status, body, _ = self.server.get("/api/settings")
+        text = body.decode("utf-8")
+        self.assertNotIn("sk-secret", text)
+        self.assertNotIn("api_key", text)
+
+    def test_session_dir_default_is_outside_the_project(self):
+        data = json.loads(self.server.get("/api/settings")[1])
+        self.assertNotIn(str(self.root), data["session_dir"])
+
+    # ---------------------------------------------------------- 写
+
+    def test_session_dir_is_saved_and_applied_live(self):
+        status, data = self.server.post(
+            "/api/settings", {"session_dir": str(self.root.parent / "sess")}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertIn("VA_SESSION_DIR", self.read_env())
+        self.assertEqual(data["restart"], [], "会话位置不用重启，新会话直接生效")
+
+    def test_empty_session_dir_restores_the_default(self):
+        self.server.post("/api/settings", {"session_dir": str(self.root / "custom")})
+        self.assertIn(str(self.root / "custom"), self.read_env())
+
+        self.server.post("/api/settings", {"session_dir": ""})
+        self.assertIn("VA_SESSION_DIR=", self.read_env())
+        live = json.loads(self.server.get("/api/settings")[1])
+        self.assertNotIn(str(self.root / "custom"), live["session_dir"])
+
+    def test_unwritable_session_dir_is_rejected_before_writing(self):
+        """校验必须在写盘前——写一半再报错会留下一个坏配置。"""
+        status, data = self.post_expecting_error({"session_dir": "/proc/nope/cannot"})
+        self.assertEqual(status, 400)
+        self.assertFalse(data["ok"])
+        self.assertNotIn("VA_SESSION_DIR", self.read_env())
+
+    def test_invalid_read_dir_is_rejected(self):
+        status, data = self.post_expecting_error({"read_dirs": ["/definitely/not/here"]})
+        self.assertEqual(status, 400)
+        self.assertIn("不是有效目录", data["error"])
+        self.assertNotIn("VA_READ_DIRS", self.read_env())
+
+    def test_valid_read_dirs_are_saved_but_need_restart(self):
+        """工作区已经建好了，改可读目录必须重启才认——不能假装热生效。"""
+        status, data = self.server.post("/api/settings", {"read_dirs": [str(self.root)]})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["restart"], "应该明确告知需要重启")
+        self.assertIn("VA_READ_DIRS", self.read_env())
+
+    def test_read_dirs_use_the_platform_separator(self):
+        other = self.root.parent / "extra"
+        other.mkdir(exist_ok=True)
+        self.server.post("/api/settings", {"read_dirs": [str(self.root), str(other)]})
+        self.assertIn(os.pathsep, self.read_env())
+
+    def test_auto_approve_applies_live(self):
+        self.server.post("/api/settings", {"auto_approve": True})
+        self.assertTrue(self.app.ui.auto_approve)
+        self.assertIn("VA_AUTO_APPROVE=1", self.read_env())
+
+    def test_show_thinking_applies_live(self):
+        self.server.post("/api/settings", {"show_thinking": False})
+        self.assertFalse(self.app.ui.show_thinking)
+        self.assertIn("VA_SHOW_THINKING=0", self.read_env())
+
+    def test_vision_model_applies_live(self):
+        self.server.post("/api/settings", {"vision_model": "seer"})
+        self.assertEqual(self.app.cfg.vision_model, "seer")
+        self.assertIn("VA_VISION_MODEL=seer", self.read_env())
+
+    def test_other_env_keys_survive(self):
+        """改设置不能把用户自己的 key 冲掉。"""
+        self.server.post("/api/settings", {"auto_approve": True})
+        self.assertIn("VA_API_KEY=sk-secret", self.read_env())
+
+    def test_changes_publish_an_event(self):
+        self.server.post("/api/settings", {"auto_approve": True})
+        events = [e for e in self.app.bus.since(0) if e["type"] == "settings"]
+        self.assertTrue(events)
+        self.assertIn("auto_approve", events[0]["changed"])
 
 
 class TestSSE(AgentTestCase):
