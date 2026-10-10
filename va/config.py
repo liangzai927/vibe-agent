@@ -96,6 +96,11 @@ class Config:
     read_scope: str = "all"
     # 会话同步到 git 远端（可选）。为空表示只存本地。
     session_remote: str = ""
+    # 长期记忆放哪 / 同步到哪（都可选）
+    memory_dir: str = ""
+    memory_remote: str = ""
+    # 一个仓库放全部数据（记忆 + 各项目的会话），按项目分目录。推荐用这个。
+    data_remote: str = ""
     # ---- 视觉模型（用于「截图 vs 设计图」比对，可选）----
     # 主模型多数不支持图片（如 deepseek-chat），所以单独配一个多模态模型。
     vision_model: str = ""
@@ -184,6 +189,9 @@ class Config:
             read_dirs=_split_paths(os.environ.get("VA_READ_DIRS")),
             read_scope=(os.environ.get("VA_READ_SCOPE") or "all").strip().lower(),
             session_remote=(os.environ.get("VA_SESSION_REMOTE") or "").strip(),
+            memory_dir=(os.environ.get("VA_MEMORY_DIR") or "").strip(),
+            memory_remote=(os.environ.get("VA_MEMORY_REMOTE") or "").strip(),
+            data_remote=(os.environ.get("VA_DATA_REMOTE") or "").strip(),
             vision_model=(os.environ.get("VA_VISION_MODEL") or "").strip(),
             vision_base_url=(os.environ.get("VA_VISION_BASE_URL") or "").strip(),
             vision_api_key=(os.environ.get("VA_VISION_API_KEY") or "").strip(),

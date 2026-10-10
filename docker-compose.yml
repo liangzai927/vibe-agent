@@ -63,6 +63,11 @@ x-common: &common
     # 显式指定配置文件位置（一般不用设）
     - VA_ENV_FILE
     - VA_SESSION_DIR
+    # 一个仓库放全部数据（记忆 + 各项目的会话），推荐用这个
+    - VA_DATA_REMOTE
+    - VA_MEMORY_REMOTE
+    - VA_MEMORY_DIR
+    - VA_GLOBAL_MEMORY_DIR
     - VA_SESSION_REMOTE
     # 默认 all（读任何位置的图片/文档都不问）。listed / workspace 更严格。
     - VA_READ_SCOPE

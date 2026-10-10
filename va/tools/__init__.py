@@ -14,6 +14,7 @@ from .fs import EditFile, ListDir, ReadFile, WriteFile
 from .git import GIT_TOOLS
 from .inspect import INSPECT_TOOLS, InspectImage
 from .plan import UpdatePlan
+from .remember import Remember
 from .render import RENDER_TOOLS
 from .review import REVIEW_TOOLS, ReviewChanges
 from .search import Glob, Grep
@@ -64,6 +65,9 @@ def build_registry(
     # 计划工具排在最前面：它是模型开工前第一个该想到的东西
     board = plan_board or (ctx.plan_board if ctx else None) or PlanBoard()
     registry.register(UpdatePlan(board))
+
+    # 长期记忆：和项目无关，换项目也该记得
+    registry.register(Remember(workspace))
 
     for tool_cls in CORE_TOOLS:
         registry.register(tool_cls(workspace))

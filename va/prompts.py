@@ -73,6 +73,19 @@ def build_system_prompt(workspace: Workspace, tool_catalog: str, extra: str = ""
 
     parts.append("# 可用工具\n" + tool_catalog + "\n")
 
+    # 长期记忆：跨项目通用，优先级高于单个项目的约定。
+    # 它每一轮都会进提示词，所以 memory.render_for_prompt 内部有长度上限。
+    from .memory import render_for_prompt as _render_memory
+
+    # 全局在前、项目级在后——越具体的越靠后，模型更容易遵守
+    remembered = _render_memory(workspace.root)
+    if remembered:
+        parts.append(
+            "# 长期记忆（用户自己的配置，必须遵守。标了「本项目」的只适用于当前项目）\n"
+            + remembered
+            + "\n"
+        )
+
     # 项目约定文件：有就读进来，这是最重要的上下文
     conventions = _read_conventions(workspace)
     if conventions:

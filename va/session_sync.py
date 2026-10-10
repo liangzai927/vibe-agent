@@ -46,14 +46,21 @@ def _slug_from_url(url: str) -> str:
     return safe
 
 
-def remote_dir(url: str) -> Path:
+def remote_dir(url: str, *, kind: str = "sessions") -> Path:
     """远端仓库的本地克隆放在哪。
 
     路径里带哈希是因为不同远端可能重名（``team/sessions`` vs ``me/sessions``），
     光靠仓库名会撞。
+
+    ``kind`` 区分用途——会话记录和长期记忆可以放在同一个仓库，也可以分开放，
+    所以缓存目录要分得开。（sessions 是默认值，保持路径不变，
+    免得用户已有的克隆失效。）
     """
     digest = hashlib.sha1(url.strip().encode("utf-8")).hexdigest()[:10]
-    return agent_home() / "remotes" / f"{_slug_from_url(url)}-{digest}"
+    slug = _slug_from_url(url)
+    if kind == "sessions":
+        return agent_home() / "remotes" / f"{slug}-{digest}"
+    return agent_home() / "remotes" / f"{kind}-{slug}-{digest}"
 
 
 def _git(args: list[str], cwd: Path | None = None, timeout: int = DEFAULT_TIMEOUT):
@@ -68,7 +75,9 @@ def _git(args: list[str], cwd: Path | None = None, timeout: int = DEFAULT_TIMEOU
     )
 
 
-def ensure_clone(url: str, *, timeout: int = DEFAULT_TIMEOUT, pull: bool = True) -> SyncResult:
+def ensure_clone(
+    url: str, *, timeout: int = DEFAULT_TIMEOUT, pull: bool = True, kind: str = "sessions"
+) -> SyncResult:
     """确保本地有一份可用的克隆。已经有的就 pull 一下。
 
     不抛异常——上层要把失败原因原样告诉用户。
@@ -77,7 +86,7 @@ def ensure_clone(url: str, *, timeout: int = DEFAULT_TIMEOUT, pull: bool = True)
     if not url:
         return SyncResult(False, detail="没填 git 地址（会话记录用哪个仓库）")
 
-    target = remote_dir(url)
+    target = remote_dir(url, kind=kind)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -113,7 +122,9 @@ def ensure_clone(url: str, *, timeout: int = DEFAULT_TIMEOUT, pull: bool = True)
     return SyncResult(True, message="已是最新")
 
 
-def sync(url: str, *, message: str = SYNC_MESSAGE, timeout: int = DEFAULT_TIMEOUT) -> SyncResult:
+def sync(
+    url: str, *, message: str = SYNC_MESSAGE, timeout: int = DEFAULT_TIMEOUT, kind: str = "sessions"
+) -> SyncResult:
     """把本地会话 commit 并推送。
 
     **推送是外部可见的动作**，所以这个函数只在明确调用时才执行。
@@ -129,9 +140,9 @@ def sync(url: str, *, message: str = SYNC_MESSAGE, timeout: int = DEFAULT_TIMEOU
             ),
         )
 
-    target = remote_dir(url)
+    target = remote_dir(url, kind=kind)
     if not (target / ".git").is_dir():
-        ready = ensure_clone(url, timeout=timeout)
+        ready = ensure_clone(url, timeout=timeout, kind=kind)
         if not ready.ok:
             return ready
 

@@ -152,7 +152,8 @@ class WebApp:
 
     def settings(self) -> dict[str, Any]:
         """当前设置。**绝不返回 api_key**——这东西会发到浏览器。"""
-        from ..paths import agent_home, describe
+        from ..memory import stats as memory_stats
+        from ..paths import agent_home, data_root, describe
 
         session_dir = SessionStore.default_dir(self.workspace.root)
         try:
@@ -173,6 +174,9 @@ class WebApp:
             "read_dirs": [str(d) for d in self.workspace.extra_read_roots if d != self.workspace.home],
             "read_scope": self.workspace.read_scope,
             "session_remote": self.cfg.session_remote,
+            "data_remote": self.cfg.data_remote,
+            "data_root": describe(data_root()),
+            "memory": memory_stats(self.workspace.root),
             "picker": self._picker_status(),
             "home": str(self.workspace.home),
             "home_display": describe(self.workspace.home),
@@ -222,7 +226,32 @@ class WebApp:
                 notes.append("已恢复默认位置（项目外）")
             changed.append("session_dir")
 
-        # ---- 会话远端 ----
+        # ---- 数据仓库（一个仓库放全部数据）----
+        if "data_remote" in payload:
+            from ..session_sync import ensure_clone
+
+            remote = str(payload["data_remote"] or "").strip()
+            if remote:
+                ready = ensure_clone(remote, kind="data")
+                if not ready.ok:
+                    # 克隆失败就不写进配置，否则会出现「配了远端但数据还在本地」
+                    return {"ok": False, "error": f"连不上这个 git 仓库：{ready.detail}"}
+                values["VA_DATA_REMOTE"] = remote
+                os.environ["VA_DATA_REMOTE"] = remote
+                # 数据仓库是「全都放这儿」，把单独指定的那几个清掉，免得打架
+                for key in ("VA_SESSION_REMOTE", "VA_SESSION_DIR"):
+                    values[key] = ""
+                    os.environ.pop(key, None)
+                notes.append(
+                    f"记忆和所有项目的会话都会进 {remote}，按项目分目录。"
+                )
+            else:
+                values["VA_DATA_REMOTE"] = ""
+                os.environ.pop("VA_DATA_REMOTE", None)
+                notes.append("已改回只存本地")
+            changed.append("data_remote")
+
+        # ---- 会话远端（单独给会话一个仓库，进阶用法）----
         if "session_remote" in payload:
             from ..session_sync import ensure_clone
 
@@ -687,7 +716,10 @@ class Handler(BaseHTTPRequestHandler):
             # 推送是外部可见的动作，所以只在明确点「同步」时才做
             from ..session_sync import sync
 
-            result = sync(self.app.cfg.session_remote)
+            if self.app.cfg.data_remote:
+                result = sync(self.app.cfg.data_remote, kind="data")
+            else:
+                result = sync(self.app.cfg.session_remote)
             self._json({"ok": result.ok, "message": result.describe()})
             return
 

@@ -58,6 +58,32 @@ def diffs_dir() -> Path:
     return screenshots_dir() / "diffs"
 
 
+def data_root() -> Path:
+    """所有 agent 数据的根。
+
+    * 配了 ``VA_DATA_REMOTE``（一个 git 仓库）→ 那份本地克隆
+    * 否则 → ``~/.vibe-agent``
+
+    **仓库里的结构是固定的**，本地和远端一致：
+
+        <data-root>/
+        ├── memory/                     所有项目都生效的偏好
+        └── projects/
+            └── <项目名-哈希>/
+                ├── memory/             只有这个项目生效的偏好
+                └── sessions/           这个项目的对话记录
+
+    **先按项目分，项目下再分**：打开仓库一眼就能看出哪个项目有哪些东西，
+    而不是一堆项目的会话和偏好混在一起。
+    """
+    remote = (os.environ.get("VA_DATA_REMOTE") or "").strip()
+    if remote:
+        from .session_sync import remote_dir
+
+        return remote_dir(remote, kind="data")
+    return agent_home()
+
+
 def project_slug(workspace: str | Path) -> str:
     """给项目起一个又好认又不会撞的短名。
 
@@ -73,19 +99,69 @@ def project_slug(workspace: str | Path) -> str:
     return f"{safe}-{digest}"
 
 
+def project_dir(workspace: str | Path) -> Path:
+    """这个项目的数据目录：``<data-root>/projects/<项目名-哈希>/``。"""
+    return data_root() / "projects" / project_slug(workspace)
+
+
+def project_memory_dir(workspace: str | Path) -> Path:
+    """只有这个项目生效的偏好。"""
+    override = (os.environ.get("VA_MEMORY_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return project_dir(workspace) / "memory"
+
+
+def global_memory_dir() -> Path:
+    """所有项目都读的偏好。放在数据根下，不属于任何项目。"""
+    override = (os.environ.get("VA_GLOBAL_MEMORY_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    remote = (os.environ.get("VA_MEMORY_REMOTE") or "").strip()
+    if remote:
+        from .session_sync import remote_dir
+
+        return remote_dir(remote, kind="memory")
+    return data_root() / "memory"
+
+
+LEGACY_HOME_SESSIONS = "sessions"
+
+
 def sessions_dir(workspace: str | Path) -> Path:
+    
     """这个项目的会话存哪。
 
-    **默认在项目之外**（``~/.vibe-agent/sessions/<项目名-哈希>/``）。
-    会话是你和 agent 的对话记录，不是项目的一部分——放在项目里会让
-    ``git status`` 一直脏着，想备份还得单独配 .gitignore。
+    **默认在项目之外**，会话是你和 agent 的对话记录，不是项目的一部分——
+    放在项目里会让 ``git status`` 一直脏着。
 
-    想让它们进 git 或同步盘，把 ``VA_SESSION_DIR`` 指过去就行。
+    三个层次，优先级从高到低：
+
+    1. ``VA_SESSION_DIR``        显式指定一个目录
+    2. ``VA_SESSION_REMOTE``     单独给会话一个仓库
+    3. ``VA_DATA_REMOTE``        所有数据共用一个仓库（推荐），按项目分目录
+
+    没配远端时用本地 ``~/.vibe-agent/sessions/<项目名-哈希>/``——
+    维持原样，免得已经存在的记录突然找不到了。
     """
     override = (os.environ.get("VA_SESSION_DIR") or "").strip()
     if override:
         return Path(override).expanduser()
-    return agent_home() / "sessions" / project_slug(workspace)
+
+    remote = (os.environ.get("VA_SESSION_REMOTE") or "").strip()
+    if remote:
+        from .session_sync import remote_dir
+
+        return remote_dir(remote)
+
+    target = project_dir(workspace) / "sessions"
+
+    # 老版本把会话放在 <home>/sessions/<slug>/。如果那儿已经有东西、
+    # 新位置还是空的，就**继续用老的**——把用户的记录弄丢比目录不整齐糟得多。
+    legacy = agent_home() / LEGACY_HOME_SESSIONS / project_slug(workspace)
+    if not target.exists() and legacy.is_dir() and any(legacy.glob("*.jsonl")):
+        return legacy
+    return target
 
 
 def _relative_to_home(path: Path) -> str | None:

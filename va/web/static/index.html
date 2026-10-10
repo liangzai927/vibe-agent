@@ -204,6 +204,11 @@
 
   .git-sum { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px;
              color: var(--muted); margin-bottom: 10px; }
+  .mem-sum { font-size: 12.5px; color: var(--muted); margin-top: 10px;
+             background: var(--panel2); border: 1px solid var(--border);
+             border-radius: 6px; padding: 8px 11px; }
+  .mem-sum b { color: var(--text); }
+  .mem-sum code { font-size: 11.5px; }
   .git-sum b { color: var(--text); font-weight: 600; }
   .git-sum .warn { color: var(--yellow); }
   .remote-row {
@@ -334,10 +339,10 @@
       </div>
 
       <div class="field">
-        <label>会话保存位置</label>
+        <label>数据保存位置</label>
         <div class="desc">
-          一个会话一个 <code>.jsonl</code>。放在项目里会一直弄脏 git status，
-          所以默认在项目外。
+          记忆和会话记录默认都在项目外<strong>（避免弄脏 git status）</strong>。
+          可以放进一个 git 仓库，多台机器共享。
         </div>
         <div class="radios">
           <label>
@@ -348,8 +353,8 @@
           </label>
           <label>
             <input type="radio" name="sess-mode" value="remote">
-            <span class="t">Git 仓库
-              <span class="d">同步到远端，多台机器之间共享记录</span>
+            <span class="t">一个 Git 仓库放全部数据
+              <span class="d">多台机器共享，按项目分目录，不会混在一起</span>
             </span>
           </label>
         </div>
@@ -366,17 +371,28 @@
           <input type="text" id="set-session-remote"
                  placeholder="git@github.com:you/va-sessions.git">
           <div class="hint-inline">
-            填一个<strong>空仓库</strong>的地址（SSH 或 HTTPS 都行）。<br>
-            这是<strong>对话记录</strong>的仓库，和你项目代码的 git 远端是两回事——
-            建议单独开一个（比如 <code>va-sessions</code>），别和代码混在一起。<br>
-            会话直接写进本地克隆，点「同步会话记录」才会推送——
-            <strong>推送是外部可见的动作，不该自动做</strong>。
+            填一个<strong>空仓库</strong>的地址（SSH 或 HTTPS 都行）。
+            这是<strong>对话记录和记忆</strong>的仓库，和你项目代码的 git 远端是两回事
+            ——建议单独开一个（比如 <code>ai-memory</code>），别和代码混在一起。<br>
+            仓库里的结构是固定的，<strong>不同项目自动分到不同目录</strong>：
+            <pre style="margin:6px 0;font-size:11.5px">memory/                       跨项目的偏好、约定
+projects/&lt;项目名-哈希&gt;/sessions/  这个项目的对话记录</pre>
+            点「同步」才会推送——<strong>推送是外部可见的动作，不该自动做</strong>。
           </div>
           <div class="row-after" style="margin-top:8px">
-            <button id="btn-sync">同步会话记录</button>
+            <button id="btn-sync">同步</button>
             <span id="sync-msg"></span>
           </div>
         </div>
+      </div>
+
+      <div class="field">
+        <label>记忆</label>
+        <div class="desc">
+          记忆会在每次对话时自动读进上下文。<strong>两级作用域</strong>：
+          「全局」所有项目都读，「本项目」只有当前项目读。
+        </div>
+        <div class="mem-sum" id="mem-sum"></div>
       </div>
 
       <div class="field">
@@ -1170,9 +1186,9 @@ async function openSettings() {
     $("git-msg").textContent = "";
     loadGit();
 
-    const isRemote = !!data.session_remote;
+    const isRemote = !!data.data_remote;
     setRadio("sess-mode", isRemote ? "remote" : "local");
-    $("set-session-remote").value = data.session_remote || "";
+    $("set-session-remote").value = data.data_remote || "";
 
     const isDefault = data.session_dir_display === data.session_dir_default;
     $("set-session-dir").value = isDefault || isRemote ? "" : data.session_dir;
@@ -1190,8 +1206,17 @@ async function openSettings() {
     $("set-thinking").checked = !!data.show_thinking;
     $("set-env-path").textContent = data.env_path;
 
+    const mem = data.memory || {};
+    $("mem-sum").innerHTML =
+      `已记住 <b>${mem.count || 0}</b> 条` +
+      `（全局 ${mem.global_count || 0} · 本项目 ${mem.project_count || 0}）` +
+      `，共 ${mem.chars || 0} 字符，超过 ${mem.budget} 字符的部分不会进上下文` +
+      (mem.count ? `<br>${(mem.names || []).join("、")}` : "") +
+      `<br>全局：<code>${escapeHtml(mem.global_dir || "")}</code>` +
+      (mem.project_dir ? `<br>本项目：<code>${escapeHtml(mem.project_dir)}</code>` : "");
+
     // 没配会话远端时，同步按钮点了也只会报错——直接禁掉并说明
-    const hasRemote = !!data.session_remote;
+    const hasRemote = !!data.data_remote;
     $("btn-sync").disabled = !hasRemote;
     $("btn-sync").title = hasRemote ? "" : "先在上面填一个仓库地址";
     if (!hasRemote) $("sync-msg").textContent = "（还没配远端）";
@@ -1233,10 +1258,10 @@ async function saveSettings() {
     show_thinking: $("set-thinking").checked,
   };
   if (getRadio("sess-mode") === "remote") {
-    payload.session_remote = $("set-session-remote").value.trim();
+    payload.data_remote = $("set-session-remote").value.trim();
     payload.session_dir = "";
   } else {
-    payload.session_remote = "";
+    payload.data_remote = "";
     payload.session_dir = $("set-session-dir").value.trim();
   }
 
