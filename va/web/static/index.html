@@ -715,6 +715,23 @@ function sessionLabel() {
   );
 }
 
+async function showStorage() {
+  // 启动时把「会话写哪、记忆仓库配没配、会不会自动推」摆出来。
+  // 「配了远端但记录还写在本地」排查起来最费劲——配置对、路径也对，
+  // 只有真去 git 里看才发现什么都没有。别让人猜。
+  let rows;
+  try {
+    rows = (await fetch("/api/storage").then((r) => r.json())).rows || [];
+  } catch (err) {
+    return;
+  }
+  // 一切正常就不打扰；只有 warn 才提示
+  const problems = rows.filter((r) => r.state === "warn");
+  for (const row of problems) {
+    pushNote("warn", `${row.label}：${row.value}${row.hint ? "（" + row.hint + "）" : ""}`);
+  }
+}
+
 async function loadHistory() {
   // 打开页面先把**当前会话已有的记录**渲染出来。
   // 不做这一步的话，va web 虽然加载了会话，界面上还是一片空白——
@@ -1416,7 +1433,7 @@ document.addEventListener("keydown", (e) => {
 loadModels();
 // 先把历史渲染完再连事件流：两者并发的话，banner 可能先到，
 // 头部就会漏掉会话那一段（谁先完成是不确定的）。
-loadHistory().finally(() => connect());
+loadHistory().then(showStorage).finally(() => connect());
 input.focus();
 </script>
 </body>

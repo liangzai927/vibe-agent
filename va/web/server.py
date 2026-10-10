@@ -481,6 +481,74 @@ class WebApp:
                 )
         return out
 
+    def storage_report(self) -> list[dict[str, str]]:
+        """存储自检：会话写哪、记忆写哪、会不会自动推。
+
+        「配了远端但记录还写在本地」是排查起来最费劲的一类问题——
+        配置对、路径算出来也对，只有真去 git 里看才发现什么都没有。
+        所以启动时就把这三件事摆出来，别让人猜。
+        """
+        import os as _os
+
+        from .. import session_sync
+        from ..paths import describe
+        from ..session import SessionStore
+
+        rows: list[dict[str, str]] = []
+
+        session_dir = SessionStore.default_dir(self.workspace.root)
+        remote = (self.cfg.data_remote or "").strip()
+        inside_repo = bool(remote) and str(session_dir).startswith(
+            str(session_sync.remote_dir(remote, kind="data"))
+        )
+        rows.append(
+            {
+                "label": "会话写在",
+                "value": describe(session_dir),
+                "state": "ok" if (not remote or inside_repo) else "warn",
+                "hint": ""
+                if (not remote or inside_repo)
+                else "配了记忆仓库，但会话没写进去——重启一下就会走仓库",
+            }
+        )
+
+        if remote:
+            rows.append(
+                {
+                    "label": "记忆仓库",
+                    "value": remote,
+                    "state": "ok",
+                    "hint": "每次回复后自动推送" if self.cfg.auto_sync else "自动推送已关闭",
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "label": "记忆仓库",
+                    "value": "未配置（只存本地）",
+                    "state": "info",
+                    "hint": "想多台机器共享就在设置里配一个",
+                }
+            )
+
+        # 项目里的老位置如果还留着记录，说明它们没被读也没被推
+        legacy = SessionStore.legacy_dir(self.workspace.root)
+        try:
+            stranded = sorted(legacy.glob("*.jsonl")) if legacy.is_dir() else []
+        except OSError:
+            stranded = []
+        if stranded and remote:
+            rows.append(
+                {
+                    "label": "旧位置的记录",
+                    "value": f"{len(stranded)} 条还在 {describe(legacy)}",
+                    "state": "warn",
+                    "hint": "重启后会自动搬进仓库",
+                }
+            )
+
+        return rows
+
     def session_info(self) -> dict[str, Any]:
         """当前会话的概况，界面顶部显示用。"""
         from ..paths import describe
@@ -724,6 +792,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self._asset("index.html")
             return
+        if parsed.path == "/api/storage":
+            self._json({"rows": self.app.storage_report()})
+            return
+
         if parsed.path == "/api/history":
             self._json({
                 "messages": self.app.history(),

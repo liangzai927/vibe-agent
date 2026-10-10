@@ -774,3 +774,96 @@ class TestLegacySessionsAreAdopted(AgentTestCase):
             cwd=str(origin), capture_output=True, text=True,
         ).stdout
         self.assertEqual(listing.count(".jsonl"), 3, f"远端没收到会话：{listing}")
+
+
+class TestStorageReport(AgentTestCase):
+    """启动自检。
+
+    「配了远端但记录还写在本地」排查起来最费劲——配置对、路径算出来也对，
+    只有真去 git 里看才发现什么都没有。所以启动时就把状态摆出来。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from va.web.server import WebApp
+
+        self.app = WebApp(self.cfg, self.workspace)
+
+    def labels(self) -> dict:
+        return {row["label"]: row for row in self.app.storage_report()}
+
+    def test_reports_no_remote_by_default(self):
+        rows = self.labels()
+        self.assertIn("会话写在", rows)
+        self.assertIn("未配置", rows["记忆仓库"]["value"])
+
+    def test_warns_when_sessions_are_not_in_the_configured_repo(self):
+        """**这就是用户踩的坑**：配了仓库，会话却还在项目里。"""
+        import subprocess
+
+        repo = self.root / "r.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(repo)], check=True)
+        self.cfg.data_remote = str(repo)
+        self.cfg.auto_sync = True
+
+        legacy = self.root / ".va" / "sessions"
+        legacy.mkdir(parents=True)
+        (legacy / "x.jsonl").write_text("{}", encoding="utf-8")
+
+        rows = self.labels()
+        self.assertEqual(rows["旧位置的记录"]["state"], "warn")
+        self.assertIn("自动搬进仓库", rows["旧位置的记录"]["hint"])
+
+    def test_says_auto_push_is_on(self):
+        import subprocess
+
+        repo = self.root / "r.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(repo)], check=True)
+        self.cfg.data_remote = str(repo)
+        self.cfg.auto_sync = True
+        os.environ["VA_DATA_REMOTE"] = str(repo)
+        self.addCleanup(os.environ.pop, "VA_DATA_REMOTE", None)
+
+        rows = self.labels()
+        self.assertIn("自动推送", rows["记忆仓库"]["hint"])
+
+    def test_says_auto_push_is_off(self):
+        import subprocess
+
+        repo = self.root / "r.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(repo)], check=True)
+        self.cfg.data_remote = str(repo)
+        self.cfg.auto_sync = False
+
+        self.assertIn("已关闭", self.labels()["记忆仓库"]["hint"])
+
+
+class TestAutoSyncDefaults(AgentTestCase):
+    """配了仓库就默认自动同步。"""
+
+    def test_on_when_a_repo_is_configured(self):
+        from va.data_repo import auto_sync_enabled
+
+        class Cfg:
+            data_remote = "git@x:y.git"
+            auto_sync = True
+
+        self.assertTrue(auto_sync_enabled(Cfg()))
+
+    def test_off_without_a_repo(self):
+        from va.data_repo import auto_sync_enabled
+
+        class Cfg:
+            data_remote = ""
+            auto_sync = True
+
+        self.assertFalse(auto_sync_enabled(Cfg()))
+
+    def test_explicitly_disabled(self):
+        from va.data_repo import auto_sync_enabled
+
+        class Cfg:
+            data_remote = "git@x:y.git"
+            auto_sync = False
+
+        self.assertFalse(auto_sync_enabled(Cfg()))
