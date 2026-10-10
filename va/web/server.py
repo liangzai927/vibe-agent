@@ -98,6 +98,56 @@ class WebApp:
         # 不然「跑一次测试」就会把开发者真实的配置和模型缓存冲掉。
         self.models_dir = models_dir or AGENT_DIR
 
+    # ------------------------------------------------------------- 项目仓库
+
+    def git_state(self) -> dict[str, Any]:
+        """项目代码仓库的现状。
+
+        **这和 session_remote 是两个不同的仓库**，界面上必须说清楚，
+        否则用户会以为配了一个另一个就自动好了。
+        """
+        from ..gitstate import state
+
+        info = state(self.workspace.root)
+        return {
+            "is_repo": info.is_repo,
+            "branch": info.branch,
+            "remotes": [{"name": n, "url": u} for n, u in info.remotes],
+            "origin_url": info.origin_url,
+            "dirty": info.dirty,
+            "untracked": info.untracked,
+            "ahead": info.ahead,
+            "behind": info.behind,
+            "has_upstream": info.has_upstream,
+            "last_commit": info.last_commit,
+            "error": info.error,
+        }
+
+    def actualise_git(self, command: str, params: dict[str, Any]) -> dict[str, Any]:
+        from .. import gitstate
+
+        root = self.workspace.root
+        if command == "set-remote":
+            ok, message = gitstate.set_remote(
+                root, str(params.get("name") or "origin"), str(params.get("url") or "")
+            )
+        elif command == "remove-remote":
+            ok, message = gitstate.remove_remote(root, str(params.get("name") or ""))
+        elif command == "push":
+            ok, message = gitstate.push(
+                root,
+                str(params.get("remote") or "origin"),
+                str(params.get("branch") or ""),
+            )
+        elif command == "init":
+            ok, message = gitstate.init_repo(root)
+        else:
+            return {"ok": False, "error": f"未知操作：{command}"}
+
+        if ok:
+            self.bus.publish("note", level="success", text=message)
+        return {"ok": ok, "message": message, "state": self.git_state()}
+
     # ------------------------------------------------------------- 设置
 
     def settings(self) -> dict[str, Any]:
@@ -501,6 +551,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self.app.settings())
             return
 
+        if parsed.path == "/api/git":
+            self._json(self.app.git_state())
+            return
+
         if parsed.path == "/api/pick-folder":
             # 浏览器给不出真实路径，所以由服务端弹系统原生选择框
             from ..dialogs import pick_folder
@@ -612,6 +666,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._body()
             ok, message = self.app.submit(str(payload.get("text", "")))
             self._json({"ok": ok, "message": message}, 200 if ok else 409)
+            return
+
+        if parsed.path == "/api/git":
+            payload = self._body()
+            self._json(
+                self.app.actualise_git(
+                    str(payload.get("command") or ""), payload
+                )
+            )
             return
 
         if parsed.path == "/api/settings":

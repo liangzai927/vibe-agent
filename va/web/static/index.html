@@ -202,6 +202,25 @@
   .hint-inline { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .warn-inline { color: var(--yellow); font-size: 12px; margin-top: 6px; }
 
+  .git-sum { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px;
+             color: var(--muted); margin-bottom: 10px; }
+  .git-sum b { color: var(--text); font-weight: 600; }
+  .git-sum .warn { color: var(--yellow); }
+  .remote-row {
+    display: flex; align-items: center; gap: 8px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+    font-family: var(--mono); font-size: 12.5px; margin-bottom: 6px;
+  }
+  .remote-row .nm { color: var(--accent); font-weight: 600; min-width: 56px; }
+  .remote-row .url { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .remote-row button { padding: 1px 7px; font-size: 12px; }
+  .remote-edit { display: flex; gap: 6px; margin-top: 8px; }
+  .remote-edit input { flex: 1; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font: inherit; font-size: 12.5px;
+    padding: 6px 9px; font-family: var(--mono); outline: none; }
+  .remote-edit input:focus { border-color: var(--accent); }
+  .remote-edit input.nm { flex: 0 0 90px; }
+
   .restart {
     color: var(--yellow); background: #d2992212; border: 1px solid #5c4a1a;
     border-radius: 6px; padding: 8px 11px; font-size: 12.5px; margin-top: 14px;
@@ -294,6 +313,25 @@
       <button id="settings-close">关闭</button>
     </header>
     <div class="body">
+
+      <div class="field">
+        <label>项目代码的仓库</label>
+        <div class="desc">
+          你这个项目自己的 git 仓库。<strong>和下面的「会话保存位置 → Git 仓库」
+          是两个完全不同的仓库</strong>——那个放的是对话记录。
+        </div>
+        <div class="git-sum" id="git-sum"></div>
+        <div id="git-remotes"></div>
+        <div class="remote-edit">
+          <input type="text" class="nm" id="git-remote-name" value="origin" placeholder="origin">
+          <input type="text" id="git-remote-url" placeholder="git@github.com:you/repo.git">
+          <button id="git-remote-save">保存远端</button>
+        </div>
+        <div class="row-after" style="margin-top:10px">
+          <button class="primary" id="git-push">推送</button>
+          <span id="git-msg"></span>
+        </div>
+      </div>
 
       <div class="field">
         <label>会话保存位置</label>
@@ -1034,6 +1072,93 @@ async function browseFolder(prompt) {
   }
 }
 
+// ---------------------------------------------------------------- 项目仓库
+
+async function loadGit() {
+  const box = $("git-remotes");
+  const sum = $("git-sum");
+  try {
+    const data = await fetch("/api/git").then((r) => r.json());
+    if (!data.is_repo) {
+      sum.innerHTML = "<span>这个目录还不是 git 仓库。</span>";
+      box.innerHTML = "";
+      $("git-push").disabled = true;
+      $("git-remote-save").disabled = true;
+      return;
+    }
+
+    const bits = [`分支 <b>${escapeHtml(data.branch)}</b>`];
+    if (data.dirty || data.untracked) {
+      bits.push(`<span class="warn">${data.dirty} 个改动 · ${data.untracked} 个新文件</span>`);
+    } else {
+      bits.push("工作区干净");
+    }
+    if (data.has_upstream) {
+      if (data.ahead) bits.push(`<span class="warn">领先远端 ${data.ahead} 个提交</span>`);
+      if (data.behind) bits.push(`<span class="warn">落后远端 ${data.behind} 个提交</span>`);
+      if (!data.ahead && !data.behind) bits.push("和远端一致");
+    } else if (data.origin_url) {
+      bits.push("还没推过");
+    }
+    sum.innerHTML = bits.map((b) => `<span>${b}</span>`).join("");
+
+    box.innerHTML = "";
+    if (!data.remotes.length) {
+      const empty = document.createElement("div");
+      empty.className = "dir-empty";
+      empty.textContent = "还没配远端。下面填一个地址保存。";
+      box.appendChild(empty);
+    }
+    data.remotes.forEach((r) => {
+      const row = document.createElement("div");
+      row.className = "remote-row";
+      const name = document.createElement("span");
+      name.className = "nm";
+      name.textContent = r.name;
+      const url = document.createElement("span");
+      url.className = "url";
+      url.textContent = r.url;
+      url.title = r.url;
+      const del = document.createElement("button");
+      del.textContent = "删除";
+      del.addEventListener("click", () => gitCommand("remove-remote", { name: r.name }));
+      row.appendChild(name);
+      row.appendChild(url);
+      row.appendChild(del);
+      box.appendChild(row);
+    });
+
+    $("git-push").disabled = !data.remotes.length;
+    $("git-push").textContent = data.ahead ? `推送（${data.ahead} 个提交）` : "推送";
+    $("git-remote-save").disabled = false;
+  } catch (err) {
+    sum.innerHTML = `<span class="warn">读仓库状态失败：${escapeHtml(String(err))}</span>`;
+  }
+}
+
+async function gitCommand(command, params) {
+  $("git-msg").textContent = "处理中…";
+  try {
+    const res = await fetch("/api/git", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command, ...(params || {}) }),
+    });
+    const data = await res.json();
+    $("git-msg").textContent = (data.ok ? "✓ " : "✗ ") + (data.message || data.error || "");
+    if (data.state) renderGitState(data.state);
+    if (data.ok) loadGit();
+  } catch (err) {
+    $("git-msg").textContent = "✗ " + err;
+  }
+}
+
+function renderGitState(state) {
+  // 用返回的状态直接刷新，省一次请求
+  if (!state || !state.is_repo) return;
+  $("git-push").disabled = !state.remotes.length;
+}
+
 async function openSettings() {
   $("set-msg").textContent = "";
   $("sync-msg").textContent = "";
@@ -1042,6 +1167,8 @@ async function openSettings() {
   try {
     const data = await fetch("/api/settings").then((r) => r.json());
     settingsCache = data;
+    $("git-msg").textContent = "";
+    loadGit();
 
     const isRemote = !!data.session_remote;
     setRadio("sess-mode", isRemote ? "remote" : "local");
@@ -1194,6 +1321,16 @@ $("set-session-dir").addEventListener("input", (e) => {
   $("set-session-resolved").textContent =
     raw || settingsCache?.session_dir_default || "";
 });
+
+$("git-remote-save").addEventListener("click", () => {
+  const url = $("git-remote-url").value.trim();
+  if (!url) {
+    $("git-msg").textContent = "✗ 先填地址";
+    return;
+  }
+  gitCommand("set-remote", { name: $("git-remote-name").value.trim() || "origin", url });
+});
+$("git-push").addEventListener("click", () => gitCommand("push", {}));
 
 $("btn-settings").addEventListener("click", openSettings);
 $("settings-close").addEventListener("click", closeSettings);
