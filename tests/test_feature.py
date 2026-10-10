@@ -18,7 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from helpers import AgentTestCase, ScriptedLLM, turn  # noqa: E402
+from helpers import AgentTestCase, QuietUI, ScriptedLLM, turn  # noqa: E402
 from va.feature import (  # noqa: E402
     FeatureRequest,
     build_task,
@@ -182,7 +182,7 @@ class TestPipelineRun(AgentTestCase):
 
         agent = Agent(
             self.cfg,
-            ui := __import__("tests.helpers", fromlist=["QuietUI"]).QuietUI(
+            ui := QuietUI(
                 self.workspace, approve=True
             ),
             workspace=self.workspace,
@@ -234,7 +234,6 @@ class TestPipelineRun(AgentTestCase):
             ws = Workspace(other)
             from va.loop import Agent
             from va.tools import build_registry
-            from tests.helpers import QuietUI
 
             ui = QuietUI(ws, approve=True)
             agent = Agent(

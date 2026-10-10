@@ -346,3 +346,63 @@ class TestLegacySessionsAreNotLost(AgentTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestTestHarness(unittest.TestCase):
+    """测试基础设施自身的守卫。
+
+    这条是补出来的，起因很隐蔽：``tests/test_feature.py`` 里写了
+    ``from tests.helpers import QuietUI``，而别处是 ``from helpers import ...``
+    ——在 Python 眼里这是**两个模块**，于是 ``helpers.py`` 执行两遍。
+
+    第二遍又建了一个临时 home 并覆盖 ``VA_HOME``，而 ``reset_agent_home()``
+    清的是第一个。后果：**清理变成空操作**，测试之间互相污染，
+    表现成「单独跑能过、全量跑就挂」——记忆就是这么串起来的。
+    """
+
+    def test_helpers_is_idempotent_across_module_names(self):
+        import importlib.util
+        import os as _os
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import helpers as first  # noqa: PLC0415
+
+        spec = importlib.util.spec_from_file_location(
+            "tests.helpers", Path(__file__).resolve().parent / "helpers.py"
+        )
+        second = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(second)
+
+        self.assertEqual(
+            first._TEST_HOME,
+            second._TEST_HOME,
+            "helpers 被以两个模块名导入时又建了一个临时 home——"
+            "清理会清错目录，测试之间就开始互相污染",
+        )
+        self.assertEqual(_os.environ["VA_HOME"], str(first._TEST_HOME))
+
+    def test_no_test_imports_helpers_under_a_package_name(self):
+        """别处不许写 ``tests.helpers``——那正是双重导入的来源。"""
+        import re as _re
+
+        # 只认真实的 import 语句——注释、文档字符串里提到它不算
+        pattern = _re.compile(r"^\s*(from|import)\s+tests\.helpers\b")
+        offenders = []
+        for path in (Path(__file__).resolve().parent).glob("*.py"):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if pattern.match(line):
+                    offenders.append(f"{path.name}:{number}")
+        self.assertEqual(offenders, [], f"这些地方用了 tests.helpers：{offenders}")
+
+    def test_reset_actually_clears_the_home_in_use(self):
+        """清理的目录必须就是 agent 实际在用的那个。"""
+        from va.paths import agent_home
+
+        import helpers as module  # noqa: PLC0415
+
+        probe = agent_home() / "probe-dir"
+        probe.mkdir(parents=True, exist_ok=True)
+        (probe / "x.txt").write_text("x", encoding="utf-8")
+
+        module.reset_agent_home()
+        self.assertFalse(probe.exists(), "reset_agent_home 没清掉实际在用的 home")

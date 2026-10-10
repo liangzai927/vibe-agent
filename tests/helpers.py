@@ -22,9 +22,24 @@ from pathlib import Path
 # 这里统一切到临时目录，整个测试进程共用一份，退出时删掉。
 #
 # 注意必须在导入 va 之前设好：Workspace.__init__ 会读 VA_HOME。
-_TEST_HOME = Path(tempfile.mkdtemp(prefix="va-test-home-"))
-os.environ["VA_HOME"] = str(_TEST_HOME)
-atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
+# **必须幂等**：这个文件可能被以不同的模块名导入两次——
+# `from helpers import X` 和 `from tests.helpers import X` 在 Python 眼里
+# 是两个模块，于是整个文件会执行两遍。
+#
+# 曾经的后果很隐蔽：第二次执行又建了一个临时 home 并覆盖 VA_HOME，
+# 而 reset_agent_home() 清的是**第一个**目录。于是清理变成了空操作，
+# 测试之间互相污染（表现成「单独跑能过、全量跑就挂」）。
+#
+# 认已有的那个，不重复创建。
+_TEST_HOME_MARKER = "va-test-home-"
+_existing_home = (os.environ.get("VA_HOME") or "").strip()
+
+if _existing_home and _TEST_HOME_MARKER in _existing_home:
+    _TEST_HOME = Path(_existing_home)
+else:
+    _TEST_HOME = Path(tempfile.mkdtemp(prefix=_TEST_HOME_MARKER))
+    os.environ["VA_HOME"] = str(_TEST_HOME)
+    atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -175,9 +190,13 @@ def reset_agent_home() -> None:
     它是进程级共享的临时目录。不清的话，上一个测试写下的
     ``designs/x.md`` 会让下一个测试的「这个文件不该存在」假失败。
     """
+    if not _TEST_HOME.is_dir():
+        return
     for child in _TEST_HOME.iterdir():
         if child.is_dir():
-            shutil.rmtree(child, ignore_errors=True)
+            # 不吞异常：清理失败会让下一个测试看到上一个的残留，
+            # 表现成「单独跑能过、全量跑就挂」，极难查。
+            shutil.rmtree(child)
         else:
             child.unlink(missing_ok=True)
 
