@@ -169,6 +169,18 @@ SCHEMA: dict[str, dict[str, Field]] = {
             "测试门禁：strict 不过就不许提交；warn 只警告；off 关闭",
         ),
     },
+    "steps": {
+        # 每一步该做什么。**留空用内置的**——想让 agent 在某一步多做/少做
+        # 什么，写在这儿。诊断发现某步老出问题时，改的就是它。
+        "intake": Field("", str, "读需求这一步的额外要求"),
+        "branch": Field("", str, "建分支这一步的额外要求"),
+        "plan": Field("", str, "计划这一步的额外要求"),
+        "implement": Field("", str, "实现这一步的额外要求"),
+        "integrate": Field("", str, "联调这一步的额外要求"),
+        "test": Field("", str, "测试这一步的额外要求"),
+        "commit": Field("", str, "提交这一步的额外要求"),
+        "submit": Field("", str, "提测这一步的额外要求"),
+    },
     "autonomy": {
         # **默认人工审核。** 自动推进是「挣来的」——要先证明它值得信任。
         "mode": Field(

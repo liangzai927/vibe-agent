@@ -173,8 +173,9 @@ class TestAdvanceApproval(AgentTestCase):
     def test_auto_mode_records_transitions_as_auto(self):
         """自动推进不该计入无干预率的分母。"""
         self.agent.workflow.data.setdefault("autonomy", {})["mode"] = "auto"
+        # **按顺序推**——工作流现在强制顺序，跳步会被拒
         self.tool.run(task_id="T-1", to="branch")
-        self.tool.run(task_id="T-1", to="implement")
+        self.tool.run(task_id="T-1", to="plan")
         task = TaskStore(self.root).load("T-1")
         self.assertEqual([t.trigger for t in task.transitions], ["auto", "auto"])
 

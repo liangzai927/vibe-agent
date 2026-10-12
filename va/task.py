@@ -77,6 +77,55 @@ REQUIREMENTS: dict[str, str] = {
     "submit": "提交了才能提测",
 }
 
+#: **每一步该做什么。**
+#:
+#: 这是「工作流」真正跑起来的地方——不是一开始把十条指令塞给模型
+#: （那样它容易漏），而是**推进到那一步时才告诉它**。
+#:
+#: 可以在 workflow.yaml 的 steps 段里覆盖，这样「流程进化」就能改进它。
+STEPS: dict[str, str] = {
+    "intake": (
+        "读需求，提取出**可验证的验收标准**。\n"
+        "缺验收标准就**去问**，不要自己编——它是后面所有测试的判据，"
+        "编一个出来最后就是「测了个假东西」。\n"
+        "同时理清：涉及哪些模块、依赖哪些后端接口、有没有设计稿。"
+    ),
+    "branch": (
+        "建分支。**用 ticket + title 让工具按团队约定生成**，别手拼。\n"
+        "base 从 workflow.yaml 的 branch.base 取，切之前确认工作区干净。"
+    ),
+    "plan": (
+        "拆步骤。**每一步都要能验证**（跑什么命令、看什么现象）。\n"
+        "标出哪些步骤依赖后端——那些要挂起，不是硬做。"
+    ),
+    "implement": (
+        "写代码。**有后端依赖的地方先用 mock**，按 workflow.yaml 的 mock 段约定，"
+        "不要自己发明一套。\n"
+        "写完之后把「在等哪些接口」记下来（后面 task_block 要用）。"
+    ),
+    "integrate": (
+        "联调。先确认后端接口真的可用，再**对比 mock 和真实响应的结构**\n"
+        "（字段名、类型、必填性）。\n"
+        "**不一致就报差异，不要擅自猜后端意图。**"
+    ),
+    "test": (
+        "跑测试。用 run_tests——它会记进门禁台账，没跑过提交不了。\n"
+        "功能测试用 browser_run 按验收标准操作页面。\n"
+        "**没过就修到过**，不要绕过（绕过会记成严重事故）。"
+    ),
+    "commit": (
+        "提交。**用 kind + scope + subject + ticket 让工具按模板生成 message**，"
+        "别手写。\n"
+        "提交前确认测试门禁过了——没过的话 git_commit 会拒绝。"
+    ),
+    "submit": (
+        "提测。用 submit_for_test——没配 submit.target_branch 的话它什么都不做，"
+        "那是正常的。\n"
+        "推之前会再过一次门禁。"
+    ),
+    "done": "完事了。可以跑 diagnose_workflow 看看这轮有没有暴露出流程问题。",
+}
+
 #: 「干预」的种类。**这个划分就是 95% 指标的分子分母**。
 INTERVENTIONS = {
     "none": "无干预",
@@ -307,6 +356,19 @@ class Task:
 
 
 # --------------------------------------------------------------- 存储
+
+
+def step_instruction(state: str, workflow=None) -> str:
+    """这一步该做什么。workflow.yaml 的 steps 段可以覆盖。
+
+    **覆盖是「流程进化」的关键**：当诊断发现某一步老出问题，
+    改的就是这里——改的是数据，不是模型的行为。
+    """
+    if workflow is not None:
+        custom = workflow.get(f"steps.{state}", "")
+        if isinstance(custom, str) and custom.strip():
+            return custom.strip()
+    return STEPS.get(state, "")
 
 
 def tasks_dir(workspace: str | Path) -> Path:

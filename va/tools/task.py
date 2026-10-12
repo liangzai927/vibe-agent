@@ -128,6 +128,13 @@ class TaskAdvance(_TaskTool):
                 "enum": ["human", "auto"],
                 "description": "谁推的。默认 human（现在还不该自动推）",
             },
+            "force": {
+                "type": "boolean",
+                "description": (
+                    "跳过中间步骤直接到目标状态。**默认不允许**——"
+                    "跳步会让前面的检查全部落空。要用必须同时给 note 说明理由"
+                ),
+            },
         },
         "required": ["task_id"],
     }
@@ -164,6 +171,7 @@ class TaskAdvance(_TaskTool):
         intervention: str = "none",
         note: str = "",
         trigger: str = "human",
+        force: bool = False,
         **_: Any,
     ) -> str:
         task_id = (task_id or "").strip()
@@ -181,6 +189,21 @@ class TaskAdvance(_TaskTool):
             raise ToolError(
                 f"不认识的状态 {target!r}。可用：{' / '.join(STATES)}"
             )
+
+        # **顺序强制。** 不强制的话「按工作流跑」就只是句口号——
+        # agent 可以从「读需求」直接跳到「提交」，中间什么都没做。
+        # 真要跳步，得显式说 force 并给理由（会记进推进历史）。
+        expected = task.next_state()
+        if target != expected and not force:
+            raise ToolError(
+                f"不能从「{task.label}」跳到「{STATE_LABELS.get(target, target)}」。\n"
+                f"下一个应该是「{STATE_LABELS.get(expected, expected)}」。\n"
+                f"**工作流要按顺序走**——跳步会让前面的检查全部落空"
+                f"（比如没建分支就直接提交）。\n"
+                f"确实要跳的话，加 force=true 并说明理由。"
+            )
+        if target != expected and force and not note.strip():
+            raise ToolError("跳步必须说明理由（note），会记进推进历史。")
 
         if task.blocked and target != BLOCKED:
             # 从挂起恢复：清掉阻塞项
@@ -219,10 +242,25 @@ class TaskAdvance(_TaskTool):
         if gate_note:
             lines.append(f"  {gate_note}")
         lines.append(f"  进度：{task.progress()}")
+
+        # **这一步该做什么，现在才告诉它。**
+        # 一次性把十条指令塞进系统提示词，模型容易漏；
+        # 推进到那一步时再给，它就在正确的时机看到正确的那一条。
+        from ..task import step_instruction
+
+        instruction = step_instruction(target, getattr(self.ctx, "workflow", None))
+        if instruction:
+            lines.append("")
+            lines.append(f"【{STATE_LABELS.get(target, target)}】这一步要做：")
+            lines.extend(f"  {line}" for line in instruction.splitlines())
+
         nxt = task.next_state()
         if nxt:
-            lines.append(f"  下一步：{STATE_LABELS.get(nxt, nxt)}")
-        lines.append(f"  记在 {path}")
+            lines.append("")
+            lines.append(
+                f"做完之后推进到「{STATE_LABELS.get(nxt, nxt)}」"
+                f"（task_advance），推进时会检查这一步该做的做了没有。"
+            )
         return "\n".join(lines)
 
     def _check_gate(self, target: str, intervention: str) -> str:

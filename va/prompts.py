@@ -91,10 +91,76 @@ def build_system_prompt(workspace: Workspace, tool_catalog: str, extra: str = ""
     if conventions:
         parts.append("# 项目约定（来自仓库内的说明文件，必须遵守）\n" + conventions + "\n")
 
+    workflow = _workflow_section(workspace)
+    if workflow:
+        parts.append(workflow)
+
     if extra:
         parts.append("# 附加指令\n" + extra + "\n")
 
     return "\n".join(parts)
+
+
+def _workflow_section(workspace: Workspace) -> str:
+    """项目配了工作流时，告诉 agent「接到需求先开任务」。
+
+    **这一段只负责入口。** 后面每一步做什么由 `task_advance` 在推进到
+    那一步时才告诉它——一次性把十条指令塞进系统提示词，模型容易漏；
+    而且流程改了提示词也不会跟着变。
+
+    所以这里的措辞重点是「**别直接动手，先开任务**」，
+    以及「顺序是强制的」——让它知道跳步会被拦。
+    """
+    from .workflow import load as load_workflow
+
+    try:
+        workflow = load_workflow(workspace.root)
+    except Exception:  # noqa: BLE001 - 配置坏了不该让 agent 起不来
+        return ""
+
+    configured = bool(workflow.sources)
+    if not configured:
+        return ""
+
+    # 把最关键的几条约定直接摆出来——它们影响「动不动手」的判断，
+    # 不适合等到推进到那一步才知道
+    facts = []
+    if workflow.branch_base:
+        facts.append(f"分支从 `{workflow.branch_base}` 切")
+    if workflow.test_start:
+        facts.append(f"起项目用 `{workflow.test_start}`")
+    if workflow.submit_branch:
+        facts.append(f"提测推到 `{workflow.submit_branch}`")
+    else:
+        facts.append("**没配提测目标，所以不会提测**")
+
+    lines = [
+        "# 工作流（这个项目配了 .vibe/workflow.yaml）",
+        "",
+        "**接到需求时不要直接动手。** 先开一个任务，然后按状态逐步推进：",
+        "",
+        '    task_advance(task_id="<需求号>", title="<标题>")',
+        "",
+        "**每一步该做什么，推进的时候会告诉你**——不用一次记住全部。",
+        "顺序是强制的：跳步会被拒绝（要跳必须显式说明理由）。",
+        "",
+        "相关工具：",
+        "  · `task_advance` / `task_status` / `task_block` —— 任务状态与挂起",
+        "  · `git_create_branch` / `git_commit` —— 建分支、提交（按团队约定校验）",
+        "  · `run_tests` / `browser_run` —— 测试（结果记进门禁）",
+        "  · `submit_for_test` —— 提测",
+        "  · `diagnose_workflow` —— 看流程本身哪里不对",
+        "  · `propose_workflow_change` —— 发现约定和实际不符时提议改配置",
+        "",
+        "几条硬规则：",
+        "  · **测试没跑绿提交不了**——门禁拦在 `git_commit` 里",
+        "  · **有后端依赖就 `task_block` 挂起**，别硬做；挂起要给可判定的恢复条件",
+        "  · **不可逆动作要人确认**（提交、提测）",
+        "",
+        "这个项目的约定：" + "；".join(facts),
+        "",
+    ]
+    return "\n".join(lines)
 
 
 CONVENTION_FILES = ("AGENTS.md", "CLAUDE.md", "VA.md", ".va/instructions.md")

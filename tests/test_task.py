@@ -312,3 +312,122 @@ class TestWebBoard(AgentTestCase):
         empty = WebApp(self.cfg, self.workspace)
         (self.root / ".vibe" / "tasks" / "ORD-9.json").unlink()
         self.assertEqual(empty.task_report()["tasks"], [])
+
+
+class TestWorkflowIsEnforced(AgentTestCase):
+    """**「按工作流跑」不能只是句口号。**
+
+    建了一堆机制，但如果没有东西保证 agent 按顺序用它们，
+    那和「提示词里写请遵守流程」没区别——还是祈祷。
+
+    三件事让它真的跑起来：
+      1. 顺序强制（跳步被拒）
+      2. **每一步该做什么，推进到那一步时才告诉它**
+      3. 系统提示词里点明「接到需求先开任务」
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from va.loop import Agent
+        from va.ui import UI
+
+        self.agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        self.advance = self.agent.registry.get("task_advance")
+
+    def test_skipping_steps_is_refused(self):
+        """不强制的话，agent 可以从「读需求」直接跳到「提交」，
+        中间什么都没做，而前面所有的检查全部落空。"""
+        with self.assertRaises(ToolError) as ctx:
+            self.advance.run(task_id="T-1", to="commit")
+        message = str(ctx.exception)
+        self.assertIn("不能从", message)
+        self.assertIn("建分支", message, "要说出下一个应该是哪个")
+
+    def test_force_requires_a_reason(self):
+        with self.assertRaises(ToolError) as ctx:
+            self.advance.run(task_id="T-1", to="commit", force=True)
+        self.assertIn("理由", str(ctx.exception))
+
+    def test_force_with_a_reason_works_and_is_recorded(self):
+        self.advance.run(
+            task_id="T-1", to="commit", force=True, note="历史任务补录"
+        )
+        task = TaskStore(self.root).load("T-1")
+        self.assertEqual(task.state, "commit")
+        self.assertIn("补录", task.transitions[0].note)
+
+    def test_normal_advance_is_allowed(self):
+        self.assertIn("读需求 → 建分支", self.advance.run(task_id="T-1", to="branch"))
+
+    def test_the_step_instruction_is_returned(self):
+        """**一次性把十条指令塞进系统提示词，模型容易漏。**
+
+        推进到那一步时再给，它就在正确的时机看到正确的那一条。
+        """
+        output = self.advance.run(task_id="T-1", to="branch")
+        self.assertIn("这一步要做", output)
+        self.assertIn("ticket", output, "没给出建分支那一步的具体要求")
+
+    def test_the_instruction_says_what_comes_next(self):
+        output = self.advance.run(task_id="T-1", to="branch")
+        self.assertIn("计划", output)
+
+    def test_instructions_are_configurable(self):
+        """**这是「流程进化」的关键**：诊断发现某一步老出问题，
+        改的就是这里——改的是数据，不是模型的行为。"""
+        self.agent.workflow.data.setdefault("steps", {})["branch"] = "必须先跟组长确认"
+        output = self.advance.run(task_id="T-1", to="branch")
+        self.assertIn("必须先跟组长确认", output)
+        self.assertNotIn("ticket + title", output, "内置指令该被覆盖掉")
+
+    def test_every_state_has_an_instruction(self):
+        from va.task import STEPS, STATES
+
+        for state in STATES:
+            self.assertTrue(STEPS.get(state), f"{state} 没有指令——推进到那步 agent 不知道该干什么")
+
+
+class TestInstructionsReachThePrompt(AgentTestCase):
+    """系统提示词里点明「接到需求先开任务」。
+
+    **它只负责入口。** 后面每一步做什么由 task_advance 下发——
+    提示词里那一段是入口，不是全部流程。
+    """
+
+    def test_no_workflow_config_means_no_section(self):
+        from va.loop import Agent
+        from va.ui import UI
+
+        agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        self.assertNotIn("# 工作流", agent.system_prompt)
+
+    def test_configured_project_gets_the_section(self):
+        from va.loop import Agent
+        from va.ui import UI
+
+        config = self.root / ".vibe" / "workflow.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("branch:\n  base: develop\n", encoding="utf-8")
+
+        agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        prompt = agent.system_prompt
+        self.assertIn("# 工作流", prompt)
+        self.assertIn("不要直接动手", prompt, "没点明「先开任务」")
+        self.assertIn("task_advance", prompt)
+        self.assertIn("develop", prompt, "该把关键约定摆出来")
+
+    def test_it_says_when_submit_is_not_configured(self):
+        """没配提测目标就明说——否则 agent 会以为该提测。"""
+        from va.loop import Agent
+        from va.ui import UI
+
+        config = self.root / ".vibe" / "workflow.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("branch:\n  base: main\n", encoding="utf-8")
+
+        agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        self.assertIn("没配提测目标", agent.system_prompt)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
