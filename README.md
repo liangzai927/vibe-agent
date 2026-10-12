@@ -529,6 +529,26 @@ git_commit(kind="feat", scope="order", subject="列表支持筛选", ticket="ORD
 
 **不让绕过 pre-commit hook**：代码里没有 `--no-verify`，宁可失败。
 
+### 模型配置（设置里改）
+
+设置面板里的「模型接口」：**API Key / Base URL / 主模型 / temperature**，
+改完**立刻生效**（重建模型客户端）并写进 `.env`，下次启动还是它。
+
+```
+API Key      [••••••]  当前：sk-123…cdef
+Base URL     [https://api.deepseek.com/v1]
+主模型       [deepseek-chat]
+temperature  [0]
+```
+
+**两条硬要求**：
+
+1. **完整密钥不回传浏览器**。界面只拿「设了没有」和一个打码的样子
+   （`sk-123…cdef`）——够显示状态就行，没有理由把密钥整段送到前端。
+   有测试盯着，而且**验证过那个测试真的能抓住泄漏**。
+2. **留空表示不改**。否则你只想改 Base URL，却把 key 抹掉了——
+   而且多半不会立刻发现，下次调用模型才炸。
+
 ### 停止任务
 
 **卡住必须有个出口。** 运行中「发送」按钮会变成「停止」：

@@ -157,6 +157,20 @@ def invalidate_walk_cache(root: Path | None = None) -> None:
         _walk_cache.pop(str(root), None)
 
 
+def _mask_secret(value: str) -> str:
+    """给界面看的打码形式。**不能把密钥整段发到浏览器。**
+
+    `sk-1234567890abcdef` → `sk-123…cdef`
+    短到没法打码的就只回「已设置」，不回内容。
+    """
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 12:
+        return "已设置"
+    return f"{text[:6]}…{text[-4:]}"
+
+
 def _fuzzy_score(query: str, text: str) -> int:
     """子序列匹配的打分。0 表示不匹配。
 
@@ -411,6 +425,13 @@ class WebApp:
             "auto_approve": self.ui.auto_approve,
             "show_thinking": self.cfg.show_thinking,
             "env_path": str(self.env_path),
+            # **API key 不打回浏览器。** 只给「设了没有」和一个打码的样子——
+            # 界面够显示状态就行，没有理由把密钥整段送到前端。
+            "model": self.cfg.model,
+            "base_url": self.cfg.base_url,
+            "temperature": self.cfg.temperature,
+            "api_key_set": bool(self.cfg.api_key),
+            "api_key_masked": _mask_secret(self.cfg.api_key),
         }
 
     @staticmethod
@@ -471,6 +492,42 @@ class WebApp:
                 registry.set_default("")
                 notes.append("默认工作区已恢复成数据目录下的 workspace/")
             changed.append("default_workspace")
+
+        # ---- 模型配置 ----
+        # 这几个改完要**立刻生效**，不然用户会以为没保存成功。
+        model_changed = False
+        for field, env_key, attr in (
+            ("api_key", "VA_API_KEY", "api_key"),
+            ("base_url", "VA_BASE_URL", "base_url"),
+            ("temperature", "VA_TEMPERATURE", "temperature"),
+            ("model", "VA_MODEL", "model"),
+        ):
+            if field not in payload:
+                continue
+            raw = str(payload.get(field) or "").strip()
+            if field == "temperature":
+                try:
+                    value: Any = float(raw) if raw else 0.0
+                except ValueError:
+                    return {"ok": False, "error": f"temperature 要是数字，收到的是 {raw!r}"}
+            else:
+                value = raw
+            # **空值不覆盖**——否则用户只改 base_url 会把 key 抹掉
+            if field != "temperature" and not raw:
+                continue
+            setattr(self.cfg, attr, value)
+            values[env_key] = raw
+            changed.append(field)
+            model_changed = True
+
+        if model_changed:
+            try:
+                from ..llm import LLM
+
+                # **重建客户端**，否则改了 key 还是用旧的连
+                self.agent.set_model(self.cfg.model)
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"配置已保存，但重建模型客户端失败：{exc}")
 
         if payload.get("setup_data_repo"):
             from ..data_repo import run as run_setup

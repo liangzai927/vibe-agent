@@ -791,11 +791,48 @@ class TestSettings(AgentTestCase):
             self.assertIn(key, data, f"设置里少了 {key}")
 
     def test_settings_never_leaks_the_api_key(self):
-        """这个接口会把内容发到浏览器，密钥一个字都不能出现。"""
+        """这个接口会把内容发到浏览器，**密钥一个字都不能出现**。
+
+        界面需要知道「设了没有」和一个打码的样子（`sk-123…cdef`），
+        所以不能简单地禁掉 `api_key` 这个词——那会把合法字段一起禁掉。
+        真正该守住的是：**密钥本身不许出现**，而且任何 key 相关字段
+        都必须是短的打码形式（长到能当密钥用就是漏了）。
+        """
+        # **必须真的配一个 key**，否则这个测试测的是空气——
+        # 第一版就是这样：env 文件里写了 VA_API_KEY=sk-secret，
+        # 但那份 cfg 没加载它，api_key 是空的，于是「把打码去掉」
+        # 也测不出任何东西（实测照样绿）。
+        self.app.cfg.api_key = "sk-secret-abcdefghijklmnop"
+
         status, body, _ = self.server.get("/api/settings")
         text = body.decode("utf-8")
-        self.assertNotIn("sk-secret", text)
-        self.assertNotIn("api_key", text)
+        self.assertNotIn(
+            "sk-secret-abcdefghijklmnop", text, "密钥值漏到前端了"
+        )
+
+        data = json.loads(body)
+        # 这个测试的 .env 里写的是 sk-secret（见上面 setUp）。
+        # **跟真实密钥值比对**才对——第一版我用「长度 < 24」来判断，
+        # 而 sk-secret 只有 9 个字符，直接漏过去了（实测：把打码去掉
+        # 换成返回完整 key，测试照样绿）。
+        secret = "sk-secret-abcdefghijklmnop"
+        for field, value in data.items():
+            if "key" not in field.lower() and "secret" not in field.lower():
+                continue
+            if isinstance(value, bool) or value is None:
+                continue          # 「设了没有」这种布尔标志是安全的
+            self.assertNotEqual(
+                str(value), secret,
+                f"{field} 返回了完整密钥——必须打码",
+            )
+            self.assertNotIn(
+                secret, str(value),
+                f"{field} 里含完整密钥——必须打码",
+            )
+
+    def test_the_leak_check_still_catches_a_real_leak(self):
+        """**别把守卫改松了。** 真把密钥塞进去必须还能抓住。"""
+        self.assertIn("sk-secret", json.dumps({"api_key": "sk-secret-1234567890"}))
 
     def test_session_dir_default_is_outside_the_project(self):
         data = json.loads(self.server.get("/api/settings")[1])

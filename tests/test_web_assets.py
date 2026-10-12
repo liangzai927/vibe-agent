@@ -57,15 +57,45 @@ class TestAssetIntegrity(unittest.TestCase):
         self.assertTrue(self.script.strip(), "script 块是空的")
 
     def test_no_cdn_references(self):
-        """必须是离线可用的——部署到没有外网的环境时不该白屏。"""
-        for pattern in ("http://", "https://", "//cdn", "integrity="):
-            for line in self.html.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("//") or "http://www.w3.org" in stripped:
-                    continue  # 注释和 SVG 命名空间
-                if pattern in stripped and "<a " not in stripped:
-                    self.fail(f"出现了外部资源引用：{stripped[:100]}")
+        """必须是离线可用的——部署到没有外网的环境时不该白屏。
 
+        **只查「会去加载东西」的地方**（src / href / @import / url()），
+        不是「任何含 https:// 的行」——`placeholder="https://api.x/v1"`
+        是个提示文字，它不加载任何东西。
+
+        （第一版就是按行扫 http:// 的，我加了个 Base URL 的输入提示
+        就被误报了。）
+        """
+        loaders = (
+            re.compile(r'\ssrc\s*=\s*["\']https?://', re.I),
+            re.compile(r'\shref\s*=\s*["\']https?://', re.I),
+            re.compile(r"@import\s+(url\()?['\"]?https?://", re.I),
+            re.compile(r"url\(\s*['\"]?https?://", re.I),
+            re.compile(r"integrity\s*=", re.I),
+        )
+        for number, line in enumerate(self.html.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("//") or "http://www.w3.org" in stripped:
+                continue          # 注释和 SVG 命名空间
+            if "<a " in stripped:
+                continue          # 普通链接，不是资源加载
+            for pattern in loaders:
+                if pattern.search(stripped):
+                    self.fail(f"第 {number} 行有外部资源加载：{stripped[:100]}")
+
+    def test_the_cdn_check_still_catches_a_real_reference(self):
+        """**别把守卫改松了。** 真的 CDN 引用必须还能抓住。"""
+        loaders = (
+            re.compile(r'\ssrc\s*=\s*["\']https?://', re.I),
+            re.compile(r"@import\s+(url\()?['\"]?https?://", re.I),
+        )
+        for bad in (
+            '<script src="https://cdn.example.com/x.js"></script>',
+            "<style>@import url('https://cdn.example.com/a.css');</style>",
+        ):
+            self.assertTrue(
+                any(p.search(bad) for p in loaders), f"漏掉了：{bad}"
+            )
     def test_script_syntax_is_valid(self):
         """用 node 检查语法（有 node 就检查，没有就跳过）。"""
         node = shutil.which("node")

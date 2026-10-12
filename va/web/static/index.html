@@ -352,6 +352,9 @@
     border-radius: 8px; padding: 8px 16px; cursor: pointer; font: inherit;
   }
   button.stop:hover { background: #8a3535; border-color: #c05050; }
+  .model-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+  .mini-label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+  .model-grid input { width: 100%; }
   .mode-row { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
   .mode-switch {
     display: inline-flex; background: var(--panel2); border: 1px solid var(--border);
@@ -649,6 +652,34 @@ projects/&lt;项目名-哈希&gt;/sessions/      这个项目的对话记录</pr
           用来读懂设计图上的文字和语义。留空的话，主模型自己能读图就沿用主模型。
           可以在 <code>/models</code> 里看哪些标着「可读图」。
         </div>
+        <div class="field" style="margin-top:14px">
+          <label>模型接口</label>
+          <div class="model-grid">
+            <div>
+              <span class="mini-label">API Key</span>
+              <input type="password" id="set-api-key" placeholder="留空 = 不改（改了立刻生效）">
+              <div class="hint-inline" id="set-api-key-state"></div>
+            </div>
+            <div>
+              <span class="mini-label">Base URL</span>
+              <input type="text" id="set-base-url" placeholder="https://api.deepseek.com/v1">
+            </div>
+            <div>
+              <span class="mini-label">主模型</span>
+              <input type="text" id="set-model" placeholder="deepseek-chat">
+            </div>
+            <div>
+              <span class="mini-label">temperature</span>
+              <input type="text" id="set-temperature" placeholder="0">
+            </div>
+          </div>
+          <div class="hint-inline">
+            <strong>API Key 留空就是不修改</strong>——所以你不会因为只想改 Base URL
+            而把 key 抹掉。填了新的会写进 <code id="set-env-path-2"></code>，并立刻重建连接。
+            完整密钥不会回传到这个页面，上面只显示打码的样子。
+          </div>
+        </div>
+
         <div class="field" style="margin-top:14px">
           <label>MCP 服务器</label>
           <div id="mcp-list" class="mcp-list">
@@ -2292,6 +2323,17 @@ function applySettings(data) {
     setRadio("read-scope", data.read_scope || "all");
 
     $("set-vision").value = data.vision_model || "";
+  // 模型配置：**key 只回打码的样子**，输入框留空
+  $("set-base-url").value = data.base_url || "";
+  $("set-model").value = data.model || "";
+  $("set-temperature").value = data.temperature != null ? String(data.temperature) : "";
+  $("set-api-key").value = "";
+  $("set-api-key").placeholder = data.api_key_set ? "留空 = 不改" : "还没配";
+  $("set-api-key-state").textContent = data.api_key_set
+    ? `当前：${data.api_key_masked || "已设置"}`
+    : "⚠ 还没配 API Key，agent 没法调用模型";
+  const env2 = $("set-env-path-2");
+  if (env2) env2.textContent = data.env_path || "";
   loadMcp();
   loadTasks();
     $("set-auto-approve").checked = !!data.auto_approve;
@@ -2365,6 +2407,12 @@ async function saveSettings() {
     read_scope: getRadio("read-scope"),
     read_dirs: readDirs,
     vision_model: $("set-vision").value.trim(),
+    // 模型配置。**key 留空表示不改**——后端也是这么处理的，
+    // 所以只改 base_url 不会把 key 抹掉。
+    api_key: $("set-api-key").value.trim(),
+    base_url: $("set-base-url").value.trim(),
+    model: $("set-model").value.trim(),
+    temperature: $("set-temperature").value.trim(),
     auto_approve: $("set-auto-approve").checked,
     show_thinking: $("set-thinking").checked,
   };

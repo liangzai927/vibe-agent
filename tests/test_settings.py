@@ -484,3 +484,86 @@ class TestSettingsRemoteAndScope(AgentTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestModelConfig(AgentTestCase):
+    """设置里改模型配置（API Key / Base URL / 模型 / temperature）。
+
+    **两条硬要求**：
+      · 完整密钥不能回传到浏览器——界面只需要知道「设了没有」和打码的样子
+      · **留空表示不改**——否则用户只想改 Base URL，却把 key 抹掉了
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from va.web.server import WebApp
+
+        self.cfg.api_key = "sk-old-key-1234567890"
+        self.cfg.base_url = "https://old.example/v1"
+        self.cfg.model = "old-model"
+        self.cfg.temperature = 0.0
+        self.app = WebApp(self.cfg, self.workspace)
+
+    def test_settings_never_send_the_full_key(self):
+        data = self.app.settings()
+        self.assertTrue(data["api_key_set"])
+        self.assertNotIn("sk-old-key-1234567890", str(data), "完整密钥漏到前端了")
+        self.assertEqual(data["api_key_masked"], "sk-old…7890")
+
+    def test_short_keys_are_not_echoed(self):
+        from va.web.server import _mask_secret
+
+        self.assertEqual(_mask_secret("sk-123"), "已设置")
+        self.assertEqual(_mask_secret(""), "")
+
+    def test_updating_the_key_takes_effect(self):
+        result = self.app.update_settings({"api_key": "sk-new-key-0987654321"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.cfg.api_key, "sk-new-key-0987654321")
+        self.assertEqual(self.app.settings()["api_key_masked"], "sk-new…4321")
+
+    def test_an_empty_key_does_not_erase_it(self):
+        """**留空表示不改。** 否则只想改 Base URL 的人会把 key 抹掉——
+        而且他多半不会立刻发现，下次调用模型才炸。"""
+        self.app.update_settings({"base_url": "https://new.example/v1"})
+        self.assertEqual(self.cfg.api_key, "sk-old-key-1234567890")
+        self.assertEqual(self.cfg.base_url, "https://new.example/v1")
+
+    def test_empty_base_url_also_does_not_erase(self):
+        self.app.update_settings({"base_url": "https://new.example/v1"})
+        self.app.update_settings({"base_url": ""})
+        self.assertEqual(self.cfg.base_url, "https://new.example/v1")
+
+    def test_the_key_is_written_to_env(self):
+        """写进 .env 下次启动才还在。"""
+        env = self.root / ".env"
+        self.app.env_path = env
+        self.app.update_settings({"api_key": "sk-persisted-0000000000"})
+        self.assertIn("VA_API_KEY=sk-persisted-0000000000", env.read_text(encoding="utf-8"))
+
+    def test_temperature_must_be_a_number(self):
+        result = self.app.update_settings({"temperature": "热"})
+        self.assertFalse(result["ok"])
+        self.assertIn("数字", result["error"])
+
+    def test_temperature_accepts_a_number(self):
+        self.app.update_settings({"temperature": "0.7"})
+        self.assertEqual(self.cfg.temperature, 0.7)
+
+    def test_temperature_can_be_set_to_zero(self):
+        """0 是合法值——**不能因为它是 falsy 就当没填**。"""
+        self.cfg.temperature = 1.5
+        self.app.update_settings({"temperature": "0"})
+        self.assertEqual(self.cfg.temperature, 0.0)
+
+    def test_changed_list_reports_what_moved(self):
+        result = self.app.update_settings(
+            {"api_key": "sk-x-1234567890", "base_url": "https://y/v1"}
+        )
+        self.assertIn("api_key", result["changed"])
+        self.assertIn("base_url", result["changed"])
+
+    def test_nothing_sent_changes_nothing(self):
+        result = self.app.update_settings({})
+        self.assertEqual(self.cfg.api_key, "sk-old-key-1234567890")
+        self.assertNotIn("api_key", result.get("changed", []))
