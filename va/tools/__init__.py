@@ -15,6 +15,7 @@ from .git import GIT_TOOLS
 from .inspect import INSPECT_TOOLS, InspectImage
 from .plan import UpdatePlan
 from .remember import Remember
+from .process import PROCESS_TOOLS
 from .render import RENDER_TOOLS
 from .review import REVIEW_TOOLS, ReviewChanges
 from .search import Glob, Grep
@@ -86,6 +87,10 @@ def build_registry(
 
     # 委派需要 UI 和撤销栈，所以只有拿到 ctx 才注册。
     # 深度用完就不再提供——子 agent 不能再往下派。
+    if ctx is not None:
+        # 后台进程需要跨调用存活，所以必须有 ctx 才注册
+        for tool_cls in PROCESS_TOOLS:
+            registry.register(tool_cls(ctx))
     if ctx is not None and ctx.can_delegate():
         for tool_cls in DELEGATE_TOOLS:
             registry.register(tool_cls(ctx))

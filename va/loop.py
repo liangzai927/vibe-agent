@@ -71,6 +71,12 @@ class Agent:
         # 子 agent 的改动于是撤不掉。
         self.undo = undo if undo is not None else UndoStack(self.workspace.root)
 
+        from .process import ProcessManager
+
+        # 每个 Agent 一套后台进程：会话结束（或进程退出）时统一清理，
+        # 不留孤儿占着端口
+        self.processes = ProcessManager(self.workspace.root)
+
         self.agent_ctx = AgentContext(
             workspace=self.workspace,
             cfg=cfg,
@@ -80,6 +86,7 @@ class Agent:
             llm=self.llm,
             depth=agent_depth,
             max_depth=cfg.max_delegate_depth,
+            processes=self.processes,
         )
 
         if registry is None:

@@ -55,6 +55,9 @@ class AgentContext:
     undo: Any = None  # UndoStack
     ui: Any = None  # UI
     llm: Any = None  # LLM —— 子 agent 要复用它，别每次新建连接
+    # 后台长驻进程（dev server 之类）。**属于会话，不属于某次工具调用**——
+    # 启动之后要在后续多次调用里继续读它、等它、停它。
+    processes: Any = None  # ProcessManager
     depth: int = 0  # 0 表示这是主 agent
     max_depth: int = 1
 
