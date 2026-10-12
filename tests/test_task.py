@@ -410,6 +410,7 @@ class TestInstructionsReachThePrompt(AgentTestCase):
         config.write_text("branch:\n  base: develop\n", encoding="utf-8")
 
         agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        agent.set_workflow_mode("task")     # 工作流那一段只在任务模式下才有
         prompt = agent.system_prompt
         self.assertIn("# 工作流", prompt)
         self.assertIn("不要直接动手", prompt, "没点明「先开任务」")
@@ -426,8 +427,72 @@ class TestInstructionsReachThePrompt(AgentTestCase):
         config.write_text("branch:\n  base: main\n", encoding="utf-8")
 
         agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        agent.set_workflow_mode("task")
         self.assertIn("没配提测目标", agent.system_prompt)
 
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestWorkflowMode(AgentTestCase):
+    """对话 / 任务 模式。
+
+    **项目配了 workflow.yaml 不代表每个问题都要建分支。**
+    「这个函数干什么」和「实现这个需求」是两回事，得让用户选。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        config = self.root / ".vibe" / "workflow.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("branch:\n  base: develop\n", encoding="utf-8")
+
+        from va.loop import Agent
+        from va.ui import UI
+
+        self.agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+
+    def test_defaults_to_chat(self):
+        """默认对话——**问一句「这个函数干什么」不该建分支**。"""
+        self.assertEqual(self.agent.workflow_mode, "chat")
+        self.assertNotIn("# 工作流", self.agent.system_prompt)
+
+    def test_task_mode_adds_the_workflow_section(self):
+        self.agent.set_workflow_mode("task")
+        self.assertIn("# 工作流", self.agent.system_prompt)
+        self.assertIn("不要直接动手", self.agent.system_prompt)
+
+    def test_switching_back_removes_it(self):
+        self.agent.set_workflow_mode("task")
+        self.agent.set_workflow_mode("chat")
+        self.assertNotIn("# 工作流", self.agent.system_prompt)
+
+    def test_the_system_message_is_replaced_not_appended(self):
+        """**要重建而不是追加**——追加的话切几次就有几份，越堆越多。"""
+        for mode in ("task", "chat", "task", "chat", "task"):
+            self.agent.set_workflow_mode(mode)
+        systems = [m for m in self.agent.messages if m["role"] == "system"]
+        self.assertEqual(len(systems), 1)
+
+    def test_unknown_mode_falls_back_to_chat(self):
+        self.agent.set_workflow_mode("nonsense")
+        self.assertEqual(self.agent.workflow_mode, "chat")
+
+    def test_setting_the_same_mode_is_a_noop(self):
+        before = self.agent.system_prompt
+        self.agent.set_workflow_mode("chat")
+        self.assertEqual(self.agent.system_prompt, before)
+
+    def test_no_workflow_config_means_task_mode_is_still_plain(self):
+        """没配工作流的项目，任务模式下也不该凭空多出一段。"""
+        import tempfile
+
+        from va.loop import Agent
+        from va.ui import UI
+        from va.workspace import Workspace
+
+        empty = Workspace(tempfile.mkdtemp())
+        agent = Agent(self.cfg, UI(empty), workspace=empty)
+        agent.set_workflow_mode("task")
+        self.assertNotIn("# 工作流", agent.system_prompt)

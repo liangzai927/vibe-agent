@@ -61,7 +61,13 @@ BASE = """你是一个在终端里工作的编码 agent，名字叫 vibe-agent�
 """
 
 
-def build_system_prompt(workspace: Workspace, tool_catalog: str, extra: str = "") -> str:
+def build_system_prompt(
+    workspace: Workspace,
+    tool_catalog: str,
+    extra: str = "",
+    *,
+    workflow_mode: str = "chat",
+) -> str:
     parts = [BASE]
 
     parts.append(
@@ -91,9 +97,13 @@ def build_system_prompt(workspace: Workspace, tool_catalog: str, extra: str = ""
     if conventions:
         parts.append("# 项目约定（来自仓库内的说明文件，必须遵守）\n" + conventions + "\n")
 
-    workflow = _workflow_section(workspace)
-    if workflow:
-        parts.append(workflow)
+    # **只在任务模式下讲工作流。**
+    # 项目配了 workflow.yaml 不代表每个问题都要建分支——
+    # 「这个函数干什么」不该触发建分支、跑测试、提交。
+    if workflow_mode == "task":
+        workflow = _workflow_section(workspace)
+        if workflow:
+            parts.append(workflow)
 
     if extra:
         parts.append("# 附加指令\n" + extra + "\n")

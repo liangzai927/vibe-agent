@@ -694,8 +694,12 @@ class WebApp:
 
     # ------------------------------------------------------------- 任务
 
-    def submit(self, text: str) -> tuple[bool, str]:
-        """接收一条输入。返回 (是否受理, 说明)。"""
+    def submit(self, text: str, mode: str = "chat") -> tuple[bool, str]:
+        """接收一条输入。返回 (是否受理, 说明)。
+
+        ``mode``：``chat`` 直接问答/改代码；``task`` 走工作流
+        （先开任务、按状态逐步推进）。
+        """
         text = (text or "").strip()
         if not text:
             return False, "空消息"
@@ -729,14 +733,16 @@ class WebApp:
         runtime.ui._emit("user", text=text)
         runtime.worker = threading.Thread(
             target=self._run,
-            args=(runtime, expanded, text),
+            args=(runtime, expanded, text, mode),
             name=f"va-task-{runtime.id[:12]}",
             daemon=True,
         )
         runtime.worker.start()
         return True, "已开始"
 
-    def _run(self, runtime: SessionRuntime, text: str, display: str = "") -> None:
+    def _run(
+        self, runtime: SessionRuntime, text: str, display: str = "", mode: str = "chat"
+    ) -> None:
         """跑一个会话的任务。
 
         **运行时是参数传进来的**，不读 ``self.active()``——用户可能在任务
@@ -745,6 +751,8 @@ class WebApp:
         """
         with runtime.lock:
             try:
+                # **切换模式要重建系统提示词**，所以放在 run 之前
+                runtime.agent.set_workflow_mode(mode)
                 answer = runtime.agent.run(text, display=display or text)
             except Exception as exc:  # noqa: BLE001 - 任何异常都要让界面知道
                 runtime.ui._emit(
@@ -1817,7 +1825,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/message":
             payload = self._body()
-            ok, message = self.app.submit(str(payload.get("text", "")))
+            ok, message = self.app.submit(
+                str(payload.get("text", "")),
+                mode=str(payload.get("mode") or "chat"),
+            )
             self._json({"ok": ok, "message": message}, 200 if ok else 409)
             return
 

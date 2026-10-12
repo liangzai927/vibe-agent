@@ -96,6 +96,11 @@ class Agent:
 
         self.ledger = TestLedger()
 
+        #: "chat" 直接问答/改代码；"task" 走工作流（先开任务、按状态推进）。
+        #: 默认 chat——**不能因为项目配了 workflow.yaml 就把每个问题都当成任务**，
+        #: 问一句「这个函数干什么」不该建分支。
+        self.workflow_mode = "chat"
+
         self.agent_ctx = AgentContext(
             workspace=self.workspace,
             cfg=cfg,
@@ -277,6 +282,19 @@ class Agent:
 
     # ------------------------------------------------------------------ 内部
 
+    def set_workflow_mode(self, mode: str) -> None:
+        """切换「对话 / 任务」。
+
+        **要重建系统提示词**——工作流那一段是按模式决定加不加的，
+        不重建的话切换了也不生效。
+        """
+        mode = "task" if str(mode).strip() == "task" else "chat"
+        if mode == self.workflow_mode:
+            return
+        self.workflow_mode = mode
+        if self.messages:
+            self.messages[0] = self._system_message()
+
     def _system_message(self) -> dict[str, Any]:
         # 恢复会话时可能已经有一份计划，直接写进系统提示词，
         # 这样模型第一轮就知道自己站在哪，不用先问一遍
@@ -285,7 +303,12 @@ class Agent:
         if reminder:
             extra = (extra + "\n\n" + reminder).strip()
 
-        prompt = build_system_prompt(self.workspace, self.registry.catalog(), extra)
+        prompt = build_system_prompt(
+            self.workspace,
+            self.registry.catalog(),
+            extra,
+            workflow_mode=self.workflow_mode,
+        )
         return system_message(prompt)
 
     def _append(self, message: dict[str, Any]) -> None:
