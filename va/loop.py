@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 from .config import Config
@@ -101,6 +102,10 @@ class Agent:
         #: 问一句「这个函数干什么」不该建分支。
         self.workflow_mode = "chat"
 
+        # **取消信号。** 卡住的代价太大了——原来的行为是「上一个任务还在跑」
+        # 一直挡着，而没有任何出口。有了它，循环和正在跑的命令都能被打断。
+        self.cancel_event = threading.Event()
+
         self.agent_ctx = AgentContext(
             workspace=self.workspace,
             cfg=cfg,
@@ -114,6 +119,7 @@ class Agent:
             mcp=self.mcp,
             workflow=self.workflow,
             ledger=self.ledger,
+            cancel_event=self.cancel_event,
         )
 
         if registry is None:
@@ -181,8 +187,18 @@ class Agent:
         reason = "max_steps"
         steps_used = 0
 
+        self.cancel_event.clear()
+
         for step in range(1, self.cfg.max_iterations + 1):
             steps_used = step
+
+            # 每一轮开头检查一次取消。**这是在两次模型调用之间的出口**——
+            # 工具内部的长命令另有各自的检查（见 run_bash）。
+            if self.cancel_event.is_set():
+                self.ui.warn("已停止")
+                self._finish_session("cancelled", steps_used)
+                return "[已停止]"
+
             self.ui.assistant_header(step)
             try:
                 turn = self.llm.complete(
@@ -282,6 +298,36 @@ class Agent:
 
     # ------------------------------------------------------------------ 内部
 
+    def cancel(self) -> str:
+        """停止这次任务。
+
+        **要做三件事**，少一件都停不干净：
+          1. 立起信号 → 循环的下一轮、下一个工具调用都会检查
+          2. 杀掉正在跑的 shell 命令 → 不然它还会占着
+          3. 杀掉后台进程 → 起过的 dev server 之类
+
+        返回一句说明（给界面显示）。
+        """
+        if self.cancel_event.is_set():
+            return "已经在停了"
+        self.cancel_event.set()
+
+        stopped = []
+        try:
+            if self.processes.stop_all():
+                stopped.append("后台进程")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .tools.shell import kill_active_shell
+
+            if kill_active_shell():
+                stopped.append("正在执行的命令")
+        except Exception:  # noqa: BLE001
+            pass
+
+        return "已停止" + ("（" + "、".join(stopped) + "也停了）" if stopped else "")
+
     def set_workflow_mode(self, mode: str) -> None:
         """切换「对话 / 任务」。
 
@@ -362,6 +408,12 @@ class Agent:
 
         try:
             for index, call in enumerate(calls, 1):
+                if self.cancel_event.is_set():
+                    self._append(
+                        tool_message(calls[0].id, "用户停止了这次任务，后续工具没有执行")
+                    )
+                    return
+
                 tool = self.registry.get(call.name)
 
                 if tool is None:

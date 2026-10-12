@@ -78,7 +78,11 @@ def build_registry(
     registry.register(Remember(workspace))
 
     for tool_cls in CORE_TOOLS:
-        registry.register(tool_cls(workspace))
+        # run_bash 要 ctx 才能被打断（不然「停止」要等它自己超时）
+        if tool_cls is RunBash and ctx is not None:
+            registry.register(tool_cls(workspace, ctx))
+        else:
+            registry.register(tool_cls(workspace))
     if include_git:
         for tool_cls in GIT_TOOLS:
             # 传 ctx：git_commit 要用它做测试门禁

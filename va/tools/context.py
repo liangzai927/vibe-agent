@@ -64,6 +64,8 @@ class AgentContext:
     workflow: Any = None  # Workflow
     # 测试台账。提交门禁读它——「不绿不许提交」靠这个成立
     ledger: Any = None  # TestLedger
+    #: 取消信号。长命令（run_bash）要能被打断，不然「停止」要等超时。
+    cancel_event: Any = None
     depth: int = 0  # 0 表示这是主 agent
     max_depth: int = 1
 

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import sys
 import json
 import mimetypes
 import os
@@ -24,6 +25,25 @@ from dataclasses import dataclass, field
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """浏览器走了不是错误。
+
+    keep-alive 连接上，浏览器关掉页面/刷新之后，服务端下一次读请求
+    会拿到 ConnectionResetError。socketserver 默认给**每个**这种连接打一整段
+    traceback——终端会被刷屏，而里面没有一条是有用的。
+    """
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(
+            exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)
+        ):
+            return          # 客户端走了，正常情况
+        super().handle_error(request, client_address)
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -694,6 +714,27 @@ class WebApp:
 
     # ------------------------------------------------------------- 任务
 
+    def cancel(self, session_id: str = "") -> tuple[bool, str]:
+        """停止正在跑的任务。
+
+        **卡住必须有个出口。** 原来的行为是「上一个任务还在跑」一直挡着，
+        而用户没有任何办法把它停下来——只能重启服务。
+        """
+        target = session_id or self.active_id
+        runtime = self.runtimes.get(target)
+        if runtime is None:
+            return False, "没有这个会话"
+        if not runtime.busy:
+            return False, "这个会话没有在跑的任务"
+
+        try:
+            note = runtime.agent.cancel()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"停止失败：{exc}"
+
+        runtime.ui._emit("note", level="warn", text=f"正在停止：{note}")
+        return True, note
+
     def submit(self, text: str, mode: str = "chat") -> tuple[bool, str]:
         """接收一条输入。返回 (是否受理, 说明)。
 
@@ -1076,8 +1117,43 @@ class WebApp:
         except Exception:  # noqa: BLE001 - 算不出来不该让看板挂掉
             autonomy_info = None
 
+        # **正在跑的会话也要显示。** 不然 agent 在干活、看板却写着
+        # 「还没有任何任务」——用户会以为它什么都没做。
+        # 它可能只是还没调 task_advance（或者根本不在任务模式）。
+        running = None
+        busy = self.any_busy()
+        if busy is not None:
+            last = ""
+            try:
+                for message in reversed(busy.agent.messages):
+                    if message.get("role") == "user":
+                        last = str(message.get("content") or "")[:120]
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+            running = {
+                "id": busy.id[:12],
+                "title": last or "（正在跑）",
+                "state": "intake",
+                "state_label": "进行中",
+                "blocked": False,
+                "finished": False,
+                "resume_to": "",
+                "branch": "",
+                "progress": "（还没建任务对象——agent 可能没走 task_advance）",
+                "next": "",
+                "next_label": "",
+                "updated_at": time.time(),
+                "blockers": [],
+                "stats": {"transitions": 0, "untouched": 0, "rate": 0.0, "interventions": {}},
+                "by_target": {},
+                "timeline": [],
+                "running": True,
+            }
+
         return {
-            "tasks": rows,
+            "tasks": ([running] if running else []) + rows,
+            "running_id": running["id"] if running else "",
             "states": list(STATES),
             "labels": STATE_LABELS,
             "bottleneck": bottleneck,
@@ -1823,6 +1899,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
 
+        if parsed.path == "/api/cancel":
+            payload = self._body()
+            ok, message = self.app.cancel(str(payload.get("session") or ""))
+            self._json({"ok": ok, "message": message}, 200 if ok else 409)
+            return
+
         if parsed.path == "/api/message":
             payload = self._body()
             ok, message = self.app.submit(
@@ -1908,7 +1990,7 @@ def serve(
     chosen = _pick_port(port) if host == "127.0.0.1" else port
     Handler.app = app
 
-    httpd = ThreadingHTTPServer((host, chosen), Handler)
+    httpd = _QuietServer((host, chosen), Handler)
     httpd.daemon_threads = True
     url = f"http://{host}:{chosen}/"
 

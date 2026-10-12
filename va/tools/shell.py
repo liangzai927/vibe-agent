@@ -12,6 +12,8 @@ import os
 import re
 import signal
 import subprocess
+import threading
+import time
 from typing import Any
 
 from ..util import truncate
@@ -34,6 +36,12 @@ FORBIDDEN = [
 
 
 class RunBash(Tool):
+    def __init__(self, workspace, ctx=None) -> None:
+        self.workspace = workspace
+        # **要 ctx 才能拿到取消信号。** 不接的话「停止」按钮对它无效——
+        # 一个卡住的 grep 只能等超时（默认 120 秒，最长 900 秒）。
+        self.ctx = ctx
+
     name = "run_bash"
     description = (
         "在工作区内执行 shell 命令并返回 stdout+stderr。"
@@ -55,8 +63,6 @@ class RunBash(Tool):
     # 任意命令的副作用无法追踪（可能改任意文件）——撤销栈必须如实标记
     opaque = True
 
-    def __init__(self, workspace: Workspace) -> None:
-        self.workspace = workspace
 
     def run(
         self,
@@ -65,6 +71,13 @@ class RunBash(Tool):
         timeout: int = DEFAULT_TIMEOUT,
         **_: Any,
     ) -> str:
+        # **取消检查从 ctx 拿。** 用参数的话每个调用方都要传，
+        # 而「能不能停」不该是调用方记得才有的能力。
+        cancel_check = None
+        ctx = getattr(self, "ctx", None)
+        if ctx is not None and getattr(ctx, "cancel_event", None) is not None:
+            cancel_check = ctx.cancel_event.is_set
+
         command = command.strip()
         if not command:
             raise ToolError("命令为空")
@@ -93,19 +106,54 @@ class RunBash(Tool):
                 start_new_session=True,  # 便于整组 kill
                 env={**os.environ, "GIT_PAGER": "cat", "PAGER": "cat", "TERM": "dumb"},
             )
+            # 登记：取消任务时要能杀掉它
+            with _active_lock:
+                _active[id(process)] = process
         except OSError as exc:
             raise ToolError(f"无法启动命令：{exc}") from exc
 
         try:
-            output, _ = process.communicate(timeout=seconds)
+            # **轮询而不是一次等到超时。** 一次 communicate(timeout=900) 的话，
+            # 用户点「停止」要等 15 分钟才生效——那等于不能停。
+            # 切成小段，每段之间看一眼取消信号。
+            deadline = time.monotonic() + seconds
+            output = ""
             timed_out = False
-        except subprocess.TimeoutExpired:
-            _kill_group(process)
-            try:
-                output, _ = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                output = ""
-            timed_out = True
+            cancelled = False
+            while True:
+                slice_seconds = min(0.4, max(0.05, deadline - time.monotonic()))
+                try:
+                    output, _ = process.communicate(timeout=slice_seconds)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel_check is not None and cancel_check():
+                        _kill_group(process, force=True)
+                        try:
+                            output, _ = process.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            output = ""
+                        cancelled = True
+                        break
+                    if time.monotonic() >= deadline:
+                        _kill_group(process)
+                        try:
+                            output, _ = process.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            output = ""
+                        timed_out = True
+                        break
+        finally:
+            with _active_lock:
+                _active.pop(id(process), None)
+
+        # 外部杀掉的（cancel() 里的 kill_active_shell）不会走 cancelled 分支——
+        # communicate 会正常返回，只是退出码是负的。**那种情况也要说清楚**，
+        # 不然用户看到的是一句莫名其妙的「exit code: -9」。
+        if not cancelled and cancel_check is not None and cancel_check():
+            cancelled = True
+
+        if cancelled:
+            raise ToolError("命令被用户停止了。\n（跑的东西已经杀掉）")
 
         output = output or ""
         exit_code = process.returncode
@@ -122,14 +170,34 @@ class RunBash(Tool):
         return "\n".join(parts)
 
 
-def _kill_group(process: subprocess.Popen) -> None:
+#: 正在跑的 shell 进程。**取消任务时要能杀掉它**——
+#: 一个 grep 卡在巨大目录树上，光靠「下一轮循环检查」是等不到的。
+_active: dict[int, subprocess.Popen] = {}
+_active_lock = threading.Lock()
+
+
+def kill_active_shell() -> bool:
+    """杀掉正在跑的 shell 命令。返回有没有杀到东西。"""
+    with _active_lock:
+        processes = list(_active.values())
+        _active.clear()
+    for process in processes:
+        _kill_group(process, force=True)
+    return bool(processes)
+
+
+def _kill_group(process: subprocess.Popen, *, force: bool = False) -> None:
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        os.killpg(
+            os.getpgid(process.pid), signal.SIGKILL if force else signal.SIGTERM
+        )
     except (ProcessLookupError, PermissionError, OSError):
         try:
             process.terminate()
         except OSError:
             return
+    if force:
+        return
     # 给它 3 秒优雅退出，否则 SIGKILL
     try:
         process.wait(timeout=3)

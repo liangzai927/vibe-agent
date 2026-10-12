@@ -347,6 +347,11 @@
   .refs div:hover, .refs div.on { background: var(--accent); color: #fff; }
 
   /* ---- 富文本输入框 + @ 引用 chip ---- */
+  button.stop {
+    background: #6e2b2b; border: 1px solid #a04040; color: #ffb3b3;
+    border-radius: 8px; padding: 8px 16px; cursor: pointer; font: inherit;
+  }
+  button.stop:hover { background: #8a3535; border-color: #c05050; }
   .mode-row { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
   .mode-switch {
     display: inline-flex; background: var(--panel2); border: 1px solid var(--border);
@@ -494,6 +499,7 @@
     </div>
     <div class="box">
       <div id="input" class="editor" contenteditable="true" role="textbox" data-placeholder="描述任务…  （@ 引用文件，Enter 发送，Shift+Enter 换行）"></div>
+      <button class="stop" id="stop" style="display:none">停止</button>
       <button class="primary" id="send">发送</button>
     </div>
     <div id="thumbs" class="thumbs"></div>
@@ -1923,7 +1929,11 @@ let busyTimer = null;
 function setStatus(busy) {
   const el = $("status");
   el.className = "pill " + (busy ? "busy" : "ready");
-  $("send").disabled = busy;
+  // **运行中把「发送」换成「停止」。**
+  // 原来卡住的时候用户没有任何办法——消息全被「上一个任务还在跑」挡住，
+  // 只能重启服务。这个按钮就是那个出口。
+  $("send").style.display = busy ? "none" : "";
+  $("stop").style.display = busy ? "" : "none";
 
   if (busy) {
     if (!busySince) busySince = Date.now();
@@ -2016,6 +2026,26 @@ function bindMode() {
   let saved = "chat";
   try { saved = localStorage.getItem("va-mode") || "chat"; } catch (err) {}
   setMode(saved, false);
+}
+
+async function stopTask() {
+  const btn = $("stop");
+  btn.disabled = true;
+  btn.textContent = "停止中…";
+  try {
+    const res = await fetch("/api/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: state.session || "" }),
+    });
+    const data = await res.json().catch(() => ({}));
+    pushNote(res.ok ? "warn" : "error", data.message || (res.ok ? "已请求停止" : "停止失败"));
+  } catch (err) {
+    pushNote("error", "停止请求失败：" + err);
+  }
+  btn.disabled = false;
+  btn.textContent = "停止";
+  // 状态由 SSE 的 task_end 更新——不在这里猜
 }
 
 async function send() {
