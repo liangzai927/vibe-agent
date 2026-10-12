@@ -283,15 +283,31 @@
   .sess .s-prev { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
   .side-empty { padding: 8px 12px; font-size: 12px; color: var(--muted); }
 
+
+  .sess .s-acts { display: none; gap: 2px; }
+  .sess:hover .s-acts { display: inline-flex; }
+  .sess .s-act {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 11px; padding: 0 2px; line-height: 1;
+  }
+  .sess .s-act:hover { color: var(--accent); }
+  .side-title > span { display: flex; align-items: center; gap: 4px; }
+
 </style>
 </head>
 <body>
 <div class="shell">
 
 <aside id="sidebar">
+  <div class="side-head">
+    <button class="primary" id="new-session">＋ 新会话</button>
+  </div>
   <div class="side-title">
     <span>工作区</span>
-    <span class="ws-count" id="side-total"></span>
+    <span>
+      <span class="ws-count" id="side-total"></span>
+      <button id="add-workspace" title="添加一个文件夹作为工作区">＋</button>
+    </span>
   </div>
   <div id="side-list"></div>
 </aside>
@@ -823,10 +839,22 @@ async function loadSidebar() {
       row.addEventListener("click", () => openSession(session.id));
       row.innerHTML =
         `<div class="s-title"><span>${escapeHtml(session.title)}</span>` +
+        `<span class="s-acts">` +
+        `<button class="s-act" data-act="rename" title="改名">✎</button>` +
+        `<button class="s-act" data-act="delete" title="删除">✕</button>` +
+        `</span>` +
         `<span class="s-when">${escapeHtml(session.when)}</span></div>` +
         (session.preview && session.preview !== session.title
           ? `<div class="s-prev">${escapeHtml(session.preview)}</div>`
           : "");
+      row.querySelectorAll(".s-act").forEach((button) => {
+        button.addEventListener("click", (ev) => {
+          ev.stopPropagation();   // 别顺手把会话也切了
+          const act = button.dataset.act;
+          if (act === "rename") renameSession(session);
+          else removeSession(session);
+        });
+      });
       wrap.appendChild(row);
     }
     list.appendChild(wrap);
@@ -848,6 +876,78 @@ async function showStorage() {
   for (const row of problems) {
     pushNote("warn", `${row.label}：${row.value}${row.hint ? "（" + row.hint + "）" : ""}`);
   }
+}
+
+async function renameSession(session) {
+  const title = prompt("给这个会话起个名字：", session.title || "");
+  if (title === null) return;
+  const result = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  }).then((r) => r.json());
+  if (!result.ok) {
+    pushNote("warn", result.error || "改名失败");
+    return;
+  }
+  await loadSidebar();
+  if (session.active) await refreshHead();
+}
+
+async function removeSession(session) {
+  if (!confirm(`删掉「${session.title}」？\n\n会话文件会被删除，不能撤销。`)) return;
+  const result = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+    method: "DELETE",
+  }).then((r) => r.json());
+  if (!result.ok) {
+    pushNote("warn", result.error || "删除失败");
+    return;
+  }
+  // 删的可能正是当前这条——服务端会切到别的，重新拉一遍就同步了
+  if (session.active) {
+    $("stream").innerHTML = "";
+    current = null; currentKind = null; lastTool = null; sessionInfo = null;
+    await loadHistory();
+  }
+  await loadSidebar();
+  await refreshHead();
+}
+
+async function newSession() {
+  const result = await fetch("/api/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),   // 默认建在当前会话的工作区里
+  }).then((r) => r.json());
+  if (!result.ok) {
+    pushNote("warn", result.error || "新建失败");
+    return;
+  }
+  $("stream").innerHTML = "";
+  current = null; currentKind = null; lastTool = null; sessionInfo = null;
+  await loadHistory();
+  await loadSidebar();
+  await refreshHead();
+}
+
+async function addWorkspace() {
+  // 让**服务端**弹系统原生选择框——浏览器拿不到真实路径
+  const picked = await fetch("/api/pick-folder?prompt=" + encodeURIComponent("选择工作区目录"))
+    .then((r) => r.json()).catch(() => null);
+  if (!picked || !picked.ok) {
+    pushNote("warn", "没能选择目录：" + ((picked && picked.error) || "已取消"));
+    return;
+  }
+  const result = await fetch("/api/workspaces", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: picked.path }),
+  }).then((r) => r.json());
+  if (!result.ok) {
+    pushNote("warn", result.error || "添加失败");
+    return;
+  }
+  await loadSidebar();
 }
 
 async function openSession(sessionId) {
@@ -1561,6 +1661,9 @@ $("set-session-dir").addEventListener("input", (e) => {
   $("set-session-resolved").textContent =
     raw || settingsCache?.session_dir_default || "";
 });
+
+$("new-session").addEventListener("click", newSession);
+$("add-workspace").addEventListener("click", addWorkspace);
 
 $("btn-settings").addEventListener("click", openSettings);
 $("settings-close").addEventListener("click", closeSettings);

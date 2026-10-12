@@ -79,6 +79,13 @@ class SessionRuntime:
         return self.worker is not None and self.worker.is_alive()
 
 
+def _all_sessions():
+    """跨工作区列出所有会话。管理接口要按 id 找到文件。"""
+    from ..projects import index_sessions
+
+    return index_sessions()
+
+
 class WebApp:
     """把 agent、事件总线、审批闸门绑在一起，供 HTTP 层调用。"""
 
@@ -806,6 +813,139 @@ class WebApp:
         store = getattr(self.agent, "session", None)
         return store.meta.id if store is not None else ""
 
+    # ------------------------------------------------------------- 工作区与会话管理
+
+    def add_workspace(self, path: str) -> dict[str, Any]:
+        """把一个文件夹加进注册表。
+
+        路径由**系统原生选择框**给（浏览器拿不到真实路径），
+        也允许手输——远程会话或者弹不出框的时候得有个退路。
+        """
+        from ..projects import Registry
+
+        raw = (path or "").strip()
+        if not raw:
+            return {"ok": False, "error": "没选目录"}
+
+        target = Path(raw).expanduser()
+        if not target.is_dir():
+            return {"ok": False, "error": f"不是有效目录：{target}"}
+
+        entry = Registry.load().add(target)
+        return {"ok": True, "workspace": {"slug": entry.slug, "path": entry.path}}
+
+    def remove_workspace(self, slug: str) -> dict[str, Any]:
+        """从注册表移除。**不删数据**——会话和记忆都还在磁盘上。"""
+        from ..projects import Registry
+
+        if not Registry.load().remove(slug):
+            return {"ok": False, "error": f"注册表里没有 {slug}"}
+        return {"ok": True}
+
+    def create_session(
+        self, workspace: str = "", title: str = ""
+    ) -> dict[str, Any]:
+        """新建一个会话。
+
+        **默认建在当前会话的工作区里**——你正在某个项目里，
+        点「新会话」自然是这个项目的新会话。想建到别处，先切过去。
+        """
+        target = Path(workspace).expanduser() if workspace else Path(self.workspace.root)
+        if not target.is_dir():
+            return {"ok": False, "error": f"工作区不存在：{target}"}
+
+        try:
+            store = SessionStore.create(str(target), self.cfg.model)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"建不出会话：{exc}"}
+
+        if title:
+            store.set_title(title)
+
+        try:
+            ws = Workspace(
+                str(target),
+                extra_read_roots=self.cfg.read_dirs,
+                read_scope=self.cfg.read_scope,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"工作区打不开：{exc}"}
+
+        ui = WebUI(
+            ws,
+            self.bus,
+            self.gate,
+            session_id=store.meta.id,
+            auto_approve=self._auto_approve,
+            show_thinking=self.cfg.show_thinking,
+        )
+        agent = Agent(self.cfg, ui, workspace=ws, llm=self._llm, session=store, history=[])
+        self.runtimes[store.meta.id] = SessionRuntime(
+            id=store.meta.id, workspace=ws, ui=ui, agent=agent, store=store
+        )
+        self._activate(store.meta.id)
+        # 通知界面：新会话来了
+        self.bus.publish("session_opened", session=store.meta.id)
+        return {"ok": True, "session": self.session_info()}
+
+    def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
+        title = (title or "").strip()
+        if not title:
+            return {"ok": False, "error": "标题不能为空"}
+        if len(title) > 80:
+            title = title[:80]
+
+        runtime = self.runtimes.get(session_id)
+        if runtime is not None and runtime.store is not None:
+            runtime.store.set_title(title)
+            return {"ok": True, "title": title}
+
+        for entry in _all_sessions():
+            if entry.id == session_id:
+                try:
+                    store = SessionStore.open(Path(entry.workspace), session_id)
+                    store.set_title(title)
+                except (OSError, FileNotFoundError) as exc:
+                    return {"ok": False, "error": f"改名失败：{exc}"}
+                return {"ok": True, "title": title}
+        return {"ok": False, "error": f"找不到会话 {session_id}"}
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        """删掉一个会话文件。
+
+        **正在跑的不让删**——那个线程还持有它，删了会写到半个文件上。
+        """
+        runtime = self.runtimes.get(session_id)
+        if runtime is not None and runtime.busy:
+            return {"ok": False, "error": "这个会话正在跑，先等它结束"}
+
+        target: Path | None = None
+        if runtime is not None and runtime.store is not None:
+            target = runtime.store.path
+        else:
+            for entry in _all_sessions():
+                if entry.id == session_id:
+                    target = Path(entry.path)
+                    break
+
+        if target is None:
+            return {"ok": False, "error": f"找不到会话 {session_id}"}
+
+        try:
+            target.unlink(missing_ok=True)
+        except OSError as exc:
+            return {"ok": False, "error": f"删不掉：{exc}"}
+
+        self.runtimes.pop(session_id, None)
+        # 删的正好是当前会话：切到随便一条别的，没有就留空
+        if session_id == self.active_id:
+            remaining = [e for e in _all_sessions() if e.id != session_id]
+            if remaining:
+                self.open_session(remaining[0].id)
+            else:
+                self.active_id = ""
+        return {"ok": True}
+
     def storage_report(self) -> list[dict[str, str]]:
         """存储自检：会话写哪、记忆写哪、会不会自动推。
 
@@ -1247,8 +1387,53 @@ class Handler(BaseHTTPRequestHandler):
 
     # ----------------------------------------------------------- POST
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        from urllib.parse import unquote as _unquote
+
+        if parsed.path.startswith("/api/workspaces/"):
+            slug = _unquote(parsed.path[len("/api/workspaces/") :].strip("/"))
+            result = self.app.remove_workspace(slug)
+            self._json(result, 200 if result.get("ok") else 404)
+            return
+
+        if parsed.path.startswith("/api/sessions/"):
+            session_id = _unquote(parsed.path[len("/api/sessions/") :].strip("/"))
+            result = self.app.delete_session(session_id)
+            self._json(result, 200 if result.get("ok") else 400)
+            return
+
+        self.send_error(404, "not found")
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        from urllib.parse import unquote as _unquote
+
+        if parsed.path.startswith("/api/sessions/"):
+            session_id = _unquote(parsed.path[len("/api/sessions/") :].strip("/"))
+            payload = self._body()
+            result = self.app.rename_session(session_id, str(payload.get("title") or ""))
+            self._json(result, 200 if result.get("ok") else 400)
+            return
+
+        self.send_error(404, "not found")
+
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/workspaces":
+            payload = self._body()
+            result = self.app.add_workspace(str(payload.get("path") or ""))
+            self._json(result, 200 if result.get("ok") else 400)
+            return
+
+        if parsed.path == "/api/sessions":
+            payload = self._body()
+            result = self.app.create_session(
+                str(payload.get("workspace") or ""), str(payload.get("title") or "")
+            )
+            self._json(result, 200 if result.get("ok") else 400)
+            return
+
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/open"):
             from urllib.parse import unquote as _unquote
 

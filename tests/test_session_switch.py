@@ -229,3 +229,139 @@ class TestIndexConsistency(SwitchTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestManagement(SwitchTestCase):
+    """新建 / 改名 / 删除 会话，以及工作区增删。"""
+
+    def test_new_session_lands_in_the_current_workspace(self):
+        """**默认建在当前会话的工作区里**——你正在某个项目里，
+        点「新会话」自然是这个项目的新会话。"""
+        app = self.app_with(self.make("p1", "A", "a"))
+        result = app.create_session()
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(Path(app.workspace.root).name, "p1")
+        self.assertNotEqual(app.active_id, "")
+        self.assertEqual(app.history(), [], "新会话不该有历史")
+
+    def test_new_session_can_target_another_workspace(self):
+        other = self.root / "p2"
+        other.mkdir()
+        app = self.app_with(self.make("p1", "A", "a"))
+        self.assertTrue(app.create_session(str(other))["ok"])
+        self.assertEqual(Path(app.workspace.root).name, "p2")
+
+    def test_new_session_rejects_a_missing_workspace(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        result = app.create_session(str(self.root / "nope"))
+        self.assertFalse(result["ok"])
+        self.assertIn("不存在", result["error"])
+
+    def test_rename(self):
+        app = self.app_with(self.make("p1", "旧名", "a"))
+        self.assertTrue(app.rename_session(app.active_id, "新名")["ok"])
+        self.assertEqual(app.session_info()["title"], "新名")
+
+    def test_rename_rejects_empty(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        self.assertFalse(app.rename_session(app.active_id, "   ")["ok"])
+
+    def test_rename_truncates(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        app.rename_session(app.active_id, "长" * 200)
+        self.assertLessEqual(len(app.session_info()["title"]), 80)
+
+    def test_rename_unknown_session(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        self.assertFalse(app.rename_session("nope", "x")["ok"])
+
+    def test_delete_removes_the_file(self):
+        a = self.make("p1", "A", "a")
+        path = a.path
+        app = self.app_with(a)
+        self.assertTrue(app.delete_session(a.meta.id)["ok"])
+        self.assertFalse(path.exists(), "文件还在")
+
+    def test_delete_switches_away_from_the_removed_session(self):
+        """删的正好是当前会话时不能留下一个指向空气的 active。"""
+        a = self.make("p1", "A", "a")
+        b = self.make("p2", "B", "b")
+        app = self.app_with(a)
+        app.open_session(b.meta.id)
+
+        self.assertTrue(app.delete_session(b.meta.id)["ok"])
+        self.assertNotEqual(app.active_id, b.meta.id)
+        self.assertIn(app.active_id, app.runtimes)
+
+    def test_delete_last_session_leaves_nothing_active(self):
+        a = self.make("p1", "A", "a")
+        app = self.app_with(a)
+        self.assertTrue(app.delete_session(a.meta.id)["ok"])
+        self.assertEqual(app.active_id, "")
+
+    def test_cannot_delete_a_running_session(self):
+        """那个线程还持有它，删了会写到半个文件上。"""
+        a = self.make("p1", "A", "a")
+        app = self.app_with(a)
+        stop = threading.Event()
+        app.runtimes[a.meta.id].worker = threading.Thread(target=stop.wait, daemon=True)
+        app.runtimes[a.meta.id].worker.start()
+        try:
+            result = app.delete_session(a.meta.id)
+            self.assertFalse(result["ok"])
+            self.assertIn("正在跑", result["error"])
+            self.assertTrue(a.path.exists(), "文件不该被删")
+        finally:
+            stop.set()
+            app.runtimes[a.meta.id].worker.join(timeout=2)
+
+    def test_delete_unknown_session(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        self.assertFalse(app.delete_session("nope")["ok"])
+
+
+class TestWorkspaceManagement(SwitchTestCase):
+    def test_add(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        other = self.root / "another"
+        other.mkdir()
+        result = app.add_workspace(str(other))
+        self.assertTrue(result["ok"], result.get("error"))
+
+        from va.projects import Registry
+
+        self.assertIsNotNone(Registry.load().find_path(other))
+
+    def test_add_is_idempotent(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        other = self.root / "another"
+        other.mkdir()
+        app.add_workspace(str(other))
+        app.add_workspace(str(other))
+
+        from va.projects import Registry
+
+        self.assertEqual(len(Registry.load().workspaces), 1)
+
+    def test_add_rejects_a_non_directory(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        result = app.add_workspace(str(self.root / "nope"))
+        self.assertFalse(result["ok"])
+        self.assertIn("不是有效目录", result["error"])
+
+    def test_add_rejects_empty(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        self.assertFalse(app.add_workspace("")["ok"])
+
+    def test_remove_keeps_the_data(self):
+        """从注册表移除 ≠ 删除数据。"""
+        a = self.make("p1", "A", "a")
+        app = self.app_with(a)
+        slug = app.add_workspace(str(self.root / "p1"))["workspace"]["slug"]
+
+        self.assertTrue(app.remove_workspace(slug)["ok"])
+        self.assertTrue(a.path.exists(), "会话文件被删了")
+
+    def test_remove_unknown(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        self.assertFalse(app.remove_workspace("nope")["ok"])
