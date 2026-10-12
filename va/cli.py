@@ -136,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         ("feature", _feature),
         ("setup", _setup),
         ("web", _web),
+        ("workflow", _workflow),
     ):
         split = split_subcommand(raw, name)
         if split is None:
@@ -696,6 +697,101 @@ def _web(argv: list[str]) -> int:
         open_browser=not args.no_browser,
         window=args.window,
     )
+
+
+# --------------------------------------------------------------------- workflow
+
+
+def _workflow(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="va workflow",
+        description="查看/初始化工作流定义（分支规则、commit 规范、测试与提测配置）",
+    )
+    parser.add_argument("-C", "--workspace", help="工作区目录（默认当前目录）")
+    parser.add_argument(
+        "--init", action="store_true", help="在工作区里生成一份带注释的模板"
+    )
+    parser.add_argument(
+        "--check", action="store_true", help="只校验配置，有问题就返回非零"
+    )
+    parser.add_argument("--json", action="store_true", help="以 JSON 输出")
+    parser.add_argument(
+        "--force", action="store_true", help="配合 --init：覆盖已存在的配置"
+    )
+    args = parser.parse_args(argv)
+
+    from .workflow import ConfigError, config_paths, load, template
+
+    root = Path(args.workspace).expanduser().resolve() if args.workspace else Path.cwd()
+    target = root / ".vibe" / "workflow.yaml"
+
+    if args.init:
+        if target.exists() and not args.force:
+            print(yellow(f"{target} 已存在。要覆盖就加 --force"), file=sys.stderr)
+            return 2
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(template(), encoding="utf-8")
+        except OSError as exc:
+            print(red(f"写不了 {target}：{exc}"), file=sys.stderr)
+            return 2
+        print(green(f"✓ 已生成 {target}"))
+        print(dim("  每个字段上面都有说明。改完跑 `va workflow --check` 校验。"))
+        return 0
+
+    try:
+        wf = load(root)
+    except ConfigError as exc:
+        print(red(f"✗ {exc}"), file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "sources": wf.sources,
+                    "configured": wf.origin_of.__self__ and sorted(wf.origins),
+                    "problems": [
+                        {"path": p.path, "message": p.message, "level": p.level, "source": p.source}
+                        for p in wf.problems
+                    ],
+                    "data": wf.to_dict(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0 if wf.usable else 2
+
+    errors = [p for p in wf.problems if p.level == "error"]
+    warnings = [p for p in wf.problems if p.level == "warn"]
+
+    print(bold("工作流配置"))
+    if wf.sources:
+        for source in wf.sources:
+            print(dim(f"  来自 {source}"))
+    else:
+        print(dim("  没有任何配置文件——全部使用默认值"))
+        print(dim("  生成一份模板：va workflow --init"))
+    print()
+    print(wf.describe())
+
+    if warnings:
+        print()
+        for problem in warnings:
+            print(yellow(f"  ⚠ {problem.path}: {problem.message}"))
+    if errors:
+        print()
+        for problem in errors:
+            print(red(f"  ✗ {problem.path}: {problem.message}"))
+        print()
+        print(red(f"{len(errors)} 处错误没解决，工作流不会生效。"))
+        return 2
+
+    if args.check:
+        print()
+        print(green("✓ 配置校验通过"))
+    return 0
 
 
 # --------------------------------------------------------------------- setup
