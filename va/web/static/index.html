@@ -319,6 +319,25 @@
   .refs div { padding: 5px 11px; cursor: pointer; white-space: nowrap; }
   .refs div:hover, .refs div.on { background: var(--accent); color: #fff; }
 
+  /* ---- 富文本输入框 + @ 引用 chip ---- */
+  .editor {
+    flex: 1; min-height: 38px; max-height: 200px; overflow-y: auto;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 12px; font: inherit; font-size: 13.5px; color: var(--text);
+    outline: none; white-space: pre-wrap; word-break: break-word; line-height: 1.6;
+  }
+  .editor:focus { border-color: var(--accent); }
+  .editor:empty::before {
+    content: attr(data-placeholder); color: var(--muted); pointer-events: none;
+  }
+  .ref-chip {
+    display: inline-flex; align-items: center; gap: 3px; vertical-align: baseline;
+    background: #1f3a5f; border: 1px solid #2d5a8f; border-radius: 5px;
+    padding: 1px 6px; margin: 0 1px; font-size: 12px; color: #a9d0ff;
+    font-family: var(--mono); user-select: none;
+  }
+  .ref-chip .chip-icon { color: var(--accent); font-size: 10px; }
+
 </style>
 </head>
 <body>
@@ -363,7 +382,7 @@
 <footer>
   <div class="composer">
     <div class="box">
-      <textarea id="input" rows="1" placeholder="描述任务…  （Enter 发送，Shift+Enter 换行）"></textarea>
+      <div id="input" class="editor" contenteditable="true" role="textbox" data-placeholder="描述任务…  （@ 引用文件，Enter 发送，Shift+Enter 换行）"></div>
       <button class="primary" id="send">发送</button>
     </div>
     <div id="thumbs" class="thumbs"></div>
@@ -841,12 +860,113 @@ const PAGE_SIZE = 8;
 const collapsed = new Set();   // 折叠起来的工作区 slug
 const shown = new Map();       // 每个工作区当前显示多少条
 
+// ---------------------------------------------------------------- 输入框
+//
+// 用 contenteditable 而不是 textarea：`@路径` 要显示成**chip**（带图标的小块），
+// 而不是一串原始文本。textarea 里没法只给一部分文字加样式。
+//
+// 代价是 value / selectionStart 这些东西得自己实现——下面这几个函数
+// 就是「富文本」和「纯文本」之间的那道桥。
+
+function editorText() {
+  // 拼成发给后端的文本：文本节点原样，chip 还原成 @路径
+  let out = "";
+  for (const node of $("input").childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      out += node.textContent;
+    } else if (node.classList && node.classList.contains("ref-chip")) {
+      out += "@" + node.dataset.path;
+    } else if (node.tagName === "BR") {
+      out += "\n";
+    } else {
+      out += node.textContent || "";
+    }
+  }
+  return out;
+}
+
+function setEditorText(text) {
+  const editor = $("input");
+  editor.innerHTML = "";
+  if (text) editor.appendChild(document.createTextNode(text));
+}
+
+function makeChip(path) {
+  const chip = document.createElement("span");
+  chip.className = "ref-chip";
+  chip.contentEditable = "false";
+  chip.dataset.path = path;
+  chip.title = path;
+  // 只显示文件名，路径放进 title——一行里放不下长路径
+  chip.innerHTML =
+    `<span class="chip-icon">◈</span>` +
+    `<span class="chip-name">${escapeHtml(path.split("/").pop())}</span>`;
+  return chip;
+}
+
+function placeCaretAfter(node) {
+  const range = document.createRange();
+  range.setStartAfter(node);
+  range.collapse(true);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function insertChip(path) {
+  const editor = $("input");
+  const selection = window.getSelection();
+  if (!selection.rangeCount) {
+    editor.appendChild(makeChip(path));
+    editor.appendChild(document.createTextNode(" "));
+    return;
+  }
+
+  // 把光标前那个 @query 删掉——chip 要顶替它
+  const range = selection.getRangeAt(0);
+  const before = range.cloneRange();
+  before.setStart(editor, 0);
+  const tail = before.toString();
+  const at = tail.lastIndexOf("@");
+  if (at >= 0) {
+    const kill = document.createRange();
+    // 用文本偏移定位：@ 到光标之间都得删
+    let remaining = tail.length - at;
+    let node = range.startContainer;
+    let offset = range.startOffset;
+    while (node && remaining > 0) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const take = Math.min(remaining, offset);
+        if (take > 0) {
+          const start = offset - take;
+          const r = document.createRange();
+          r.setStart(node, start);
+          r.setEnd(node, offset);
+          r.deleteContents();
+          remaining -= take;
+        }
+        offset = 0;
+      }
+      node = node.previousSibling;
+      if (node && node.nodeType === Node.TEXT_NODE) offset = node.textContent.length;
+      else if (node) remaining -= (node.textContent || "").length;
+    }
+  }
+
+  const chip = makeChip(path);
+  const space = document.createTextNode(" ");
+  range.insertNode(space);
+  range.insertNode(chip);
+  placeCaretAfter(space);
+  updateRefs();
+}
+
 // ---------------------------------------------------------------- @ 文件补全
 
 let refItems = [];
 let refIndex = 0;
-let refQuery = "";      // 触发补全时 @ 后面的那串
-let refStart = -1;      // @ 在输入框里的位置
+let refQuery = null;
+let fileCache = null;       // 工作区文件列表，取一次就够了
 
 function refsVisible() {
   return !$("refs").classList.contains("off");
@@ -856,6 +976,7 @@ function hideRefs() {
   $("refs").classList.add("off");
   refItems = [];
   refIndex = 0;
+  refQuery = null;
 }
 
 function positionRefs() {
@@ -863,8 +984,27 @@ function positionRefs() {
   const box = $("input").getBoundingClientRect();
   const el = $("refs");
   el.style.left = box.left + "px";
-  el.style.width = Math.min(Math.max(box.width * 0.6, 320), box.width) + "px";
+  el.style.width = Math.min(Math.max(box.width * 0.55, 300), box.width) + "px";
   el.style.bottom = window.innerHeight - box.top + 6 + "px";
+}
+
+function fuzzyScore(query, text) {
+  // 和服务端一个思路：连续命中和词边界加分
+  if (!query) return 1;
+  const hit = text.indexOf(query);
+  if (hit >= 0) return 1000 - hit;
+  let score = 0;
+  let position = 0;
+  let streak = 0;
+  for (const char of query) {
+    const found = text.indexOf(char, position);
+    if (found < 0) return 0;
+    streak = found === position ? streak + 1 : 0;
+    score += 10 + streak * 5;
+    if (found === 0 || "/-_. ".includes(text[found - 1])) score += 15;
+    position = found + 1;
+  }
+  return score;
 }
 
 function renderRefs() {
@@ -878,51 +1018,61 @@ function renderRefs() {
     .join("");
   el.classList.remove("off");
   positionRefs();
+
+  // 选中项要跟着滚——不然上下键走到看不见的位置就没法判断了
+  const active = el.querySelector("div.on");
+  if (active) active.scrollIntoView({ block: "nearest" });
+
   el.querySelectorAll("div").forEach((row) => {
     row.addEventListener("mousedown", (ev) => {
       ev.preventDefault();   // 别让输入框失焦
-      insertRef(Number(row.dataset.i));
+      insertChip(refItems[Number(row.dataset.i)]);
+      hideRefs();
     });
   });
 }
 
-function insertRef(index) {
-  const name = refItems[index];
-  if (name === undefined || refStart < 0) return;
-  const input = $("input");
-  const before = input.value.slice(0, refStart);
-  const after = input.value.slice(input.selectionStart);
-  input.value = `${before}@${name} ${after}`;
-  const caret = before.length + name.length + 2;
-  input.setSelectionRange(caret, caret);
-  input.focus();
-  hideRefs();
+async function loadFileCache() {
+  if (fileCache) return fileCache;
+  try {
+    fileCache = (await fetch("/api/files?q=").then((r) => r.json())).files || [];
+  } catch (err) {
+    fileCache = [];
+  }
+  return fileCache;
 }
 
 async function updateRefs() {
-  // 从光标往回找最近的 @：它到光标之间不能有空格，否则不算在补全
-  const input = $("input");
-  const caret = input.selectionStart;
-  const upto = input.value.slice(0, caret);
-  const at = upto.lastIndexOf("@");
-  if (at < 0 || /\s/.test(upto.slice(at + 1))) {
-    hideRefs();
-    return;
-  }
-  const query = upto.slice(at + 1);
-  refStart = at;
-  if (query === refQuery && refsVisible()) return;   // 同一个查询别反复打
+  // 从光标往前找最近的 @：它到光标之间不能有空格（否则不算在补全）
+  const selection = window.getSelection();
+  if (!selection.rangeCount) return hideRefs();
+  const range = selection.getRangeAt(0);
+  const upto = range.cloneRange();
+  upto.setStart($("input"), 0);
+  const text = upto.toString();
+  const at = text.lastIndexOf("@");
+  if (at < 0 || /\s/.test(text.slice(at + 1))) return hideRefs();
+
+  const query = text.slice(at + 1);
+  if (query === refQuery) return;     // 同一个查询别重排
   refQuery = query;
 
-  let files = [];
-  try {
-    files = (await fetch(`/api/files?q=${encodeURIComponent(query)}`).then((r) => r.json())).files || [];
-  } catch (err) {
-    return;
-  }
-  refItems = files;
+  // **在本地过滤**：每次按键都往服务端要一遍会明显卡顿，
+  // 而工作区文件列表在一次会话里几乎不变，取一次就够。
+  const files = await loadFileCache();
+  const lower = query.toLowerCase();
+  refItems = files
+    .map((name) => [fuzzyScore(lower, name.toLowerCase()), name])
+    .filter(([score]) => score > 0)
+    .sort((a, b) => b[0] - a[0] || a[1].length - b[1].length || a[1].localeCompare(b[1]))
+    .slice(0, 20)
+    .map(([, name]) => name);
   refIndex = 0;
   renderRefs();
+}
+
+function resetFileCache() {
+  fileCache = null;
 }
 
 $("input").addEventListener("input", updateRefs);
@@ -1112,6 +1262,7 @@ async function newSession(workspace) {
   }
   $("stream").innerHTML = "";
   current = null; currentKind = null; lastTool = null; sessionInfo = null;
+  resetFileCache();   // 工作区可能变了，文件列表要重新取
   await loadHistory();
   await loadSidebar();
   await refreshHead();
@@ -1178,6 +1329,7 @@ async function openSession(sessionId) {
     return;
   }
 
+  resetFileCache();   // 工作区可能变了，文件列表要重新取
   await loadHistory();
   await loadSidebar();
   await refreshHead();
@@ -1395,7 +1547,7 @@ function connect() {
 // ---------------------------------------------------------------- 发送
 
 async function send() {
-  const text = input.value.trim();
+  const text = editorText().trim();
   const images = attached.slice();
   if (!text && !images.length) return;
 
@@ -1404,7 +1556,7 @@ async function send() {
     ? (text ? text + "\n\n" : "") + images.map((p) => p.relative).join("\n")
     : text;
 
-  input.value = "";
+  setEditorText("");
   autosize();
   attached.length = 0;
   renderThumbs();
@@ -1430,11 +1582,31 @@ async function send() {
 
 $("send").addEventListener("click", send);
 $("btn-help").addEventListener("click", () => {
-  input.value = "/help";
+  setEditorText("/help");
   send();
 });
 
 input.addEventListener("keydown", (e) => {
+  // chip 后面按退格：先删 chip，而不是先删那个空格
+  if (e.key === "Backspace") {
+    const selection = window.getSelection();
+    if (selection.rangeCount && selection.isCollapsed) {
+      const range = selection.getRangeAt(0);
+      const before = range.startContainer;
+      const sibling =
+        before.nodeType === Node.TEXT_NODE && range.startOffset === 0
+          ? before.previousSibling
+          : before.nodeType === Node.ELEMENT_NODE && range.startOffset > 0
+            ? before.childNodes[range.startOffset - 1]
+            : null;
+      if (sibling && sibling.classList && sibling.classList.contains("ref-chip")) {
+        e.preventDefault();
+        sibling.remove();
+        updateRefs();
+        return;
+      }
+    }
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     send();
@@ -1516,6 +1688,14 @@ window.addEventListener("drop", (e) => {
 
 // 直接往输入框里 Ctrl+V 一张图也接住
 input.addEventListener("paste", (e) => {
+  // 富文本输入框默认会把剪贴板里的 HTML 一起粘进来，
+  // 那会带进一堆样式。图片走拖拽/粘贴上传那条路，这里只取纯文本。
+  if (!(e.clipboardData && e.clipboardData.files && e.clipboardData.files.length)) {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData("text/plain");
+    document.execCommand("insertText", false, text);
+    return;
+  }
   const items = [...(e.clipboardData?.items || [])];
   const image = items.find((it) => it.type.startsWith("image/"));
   if (image) {
@@ -1895,7 +2075,8 @@ document.addEventListener("keydown", (e) => {
     } else if (e.key === "Enter" || e.key === "Tab") {
       e.preventDefault();
       e.stopPropagation();
-      insertRef(refIndex);
+      insertChip(refItems[refIndex]);
+      hideRefs();
     }
   }
 }, true);
