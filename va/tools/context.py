@@ -58,6 +58,10 @@ class AgentContext:
     # 后台长驻进程（dev server 之类）。**属于会话，不属于某次工具调用**——
     # 启动之后要在后续多次调用里继续读它、等它、停它。
     processes: Any = None  # ProcessManager
+    # MCP 客户端（外部工具协议）。会话级：server 是子进程，要统一收拾。
+    mcp: Any = None  # McpManager
+    # 生效的工作流定义。工具的审批策略要读它（比如 mcp.approve）
+    workflow: Any = None  # Workflow
     depth: int = 0  # 0 表示这是主 agent
     max_depth: int = 1
 

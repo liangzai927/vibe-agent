@@ -653,6 +653,29 @@ git_commit 被调用
 
 ---
 
+## 阶段 M：MCP 客户端（P0，已提前）——**已完成**
+
+**为什么提前**：它不只是「生态扩展」，它是**设计稿来源的标准答案**。
+
+MasterGo 提供 Vibe MCP：本地客户端跑一个服务（`:30678`），
+`@mastergo/vibe-mcp` 做 stdio 适配器。核心工具 `get_selection_code`
+让「在设计工具里选中一个图层 → agent 直接拿到结构化代码」成为可能——
+不用导出图片、不用传 URL。`get_design_diff` 还能直接对比本地代码和画布。
+
+**实现是通用的**：stdio JSON-RPC 客户端，写一次，任何 MCP server 都能接。
+配置放在 `workflow.yaml` 的 `mcp.servers`（它也是团队约定，且天然享受
+「项目级覆盖用户级」）。
+
+三个工具：`mcp_servers` / `mcp_tools` / `mcp_call`。
+
+**没做成「每个 MCP 工具注册成原生工具」**：那要求注册时启动所有 server。
+npx 第一次要下载包（几十秒），每个会话启动都等一遍不可接受；
+server 没起来时（MasterGo 客户端没开）整个工具表还会构建失败。
+
+**默认要审批**：`agent_update_node` 会直接改设计画布。
+
+---
+
 ## 阶段 E：任务状态与挂起（P1）
 
 ### 交付物

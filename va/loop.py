@@ -77,6 +77,19 @@ class Agent:
         # 不留孤儿占着端口
         self.processes = ProcessManager(self.workspace.root)
 
+        # MCP server 配置来自工作流定义（团队约定的一部分）
+        from .mcp import McpManager, load_servers
+
+        try:
+            from .workflow import load as load_workflow
+
+            _workflow = load_workflow(self.workspace.root)
+            _servers = load_servers(_workflow)
+        except Exception:  # noqa: BLE001 - 配置坏了不该让 agent 起不来
+            _workflow, _servers = None, {}
+        self.workflow = _workflow
+        self.mcp = McpManager(_servers)
+
         self.agent_ctx = AgentContext(
             workspace=self.workspace,
             cfg=cfg,
@@ -87,6 +100,8 @@ class Agent:
             depth=agent_depth,
             max_depth=cfg.max_delegate_depth,
             processes=self.processes,
+            mcp=self.mcp,
+            workflow=self.workflow,
         )
 
         if registry is None:

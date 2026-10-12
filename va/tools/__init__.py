@@ -16,6 +16,7 @@ from .inspect import INSPECT_TOOLS, InspectImage
 from .plan import UpdatePlan
 from .remember import Remember
 from .browser import BROWSER_TOOLS
+from .mcp import MCP_TOOLS
 from .process import PROCESS_TOOLS
 from .render import RENDER_TOOLS
 from .review import REVIEW_TOOLS, ReviewChanges
@@ -93,6 +94,8 @@ def build_registry(
     if ctx is not None:
         # 后台进程需要跨调用存活，所以必须有 ctx 才注册
         for tool_cls in PROCESS_TOOLS:
+            registry.register(tool_cls(ctx))
+        for tool_cls in MCP_TOOLS:
             registry.register(tool_cls(ctx))
     if ctx is not None and ctx.can_delegate():
         for tool_cls in DELEGATE_TOOLS:

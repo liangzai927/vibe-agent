@@ -143,6 +143,20 @@ SCHEMA: dict[str, dict[str, Field]] = {
             "测试门禁：strict 不过就不许提交；warn 只警告；off 关闭",
         ),
     },
+    "mcp": {
+        "servers": Field(
+            {},
+            dict,
+            "MCP 服务器。键是名字，值是 {command, args, env}。"
+            "例如 MasterGo：command=npx args=[-y,@mastergo/vibe-mcp@latest,--url=http://localhost:30678]",
+        ),
+        "approve": Field(
+            "all",
+            str,
+            "调 MCP 工具要不要审批：all 都要（默认，因为有的工具会改外部系统，"
+            "比如改设计画布）；read 只对看起来是写操作的要；none 都不要",
+        ),
+    },
     "submit": {
         "target_branch": Field("test", str, "提测推送到哪个分支"),
         "push_mode": Field("direct", str, "direct 直接推；merge_request 开 MR"),
@@ -156,6 +170,7 @@ SCHEMA: dict[str, dict[str, Field]] = {
 CHOICES: dict[str, tuple[str, ...]] = {
     "mock.strategy": ("existing_convention", "fixed", "none"),
     "test.gate": ("strict", "warn", "off"),
+    "mcp.approve": ("all", "read", "none"),
     "submit.push_mode": ("direct", "merge_request"),
 }
 
