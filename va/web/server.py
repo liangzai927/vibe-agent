@@ -350,6 +350,23 @@ class WebApp:
             changed.append("session_dir")
 
         # ---- 初始化记忆仓库：整个工作流在 va/data_repo.py 里，这里只调它 ----
+        if "default_workspace" in payload:
+            from ..projects import Registry
+
+            raw = str(payload["default_workspace"] or "").strip()
+            registry = Registry.load()
+            if raw:
+                target = Path(raw).expanduser()
+                if not target.is_dir():
+                    return {"ok": False, "error": f"不是有效目录：{target}"}
+                registry.set_default(target)
+                registry.add(target)
+                notes.append(f"默认工作区设为 {target}")
+            else:
+                registry.set_default("")
+                notes.append("默认工作区已恢复成数据目录下的 workspace/")
+            changed.append("default_workspace")
+
         if payload.get("setup_data_repo"):
             from ..data_repo import run as run_setup
 
@@ -850,7 +867,18 @@ class WebApp:
         **默认建在当前会话的工作区里**——你正在某个项目里，
         点「新会话」自然是这个项目的新会话。想建到别处，先切过去。
         """
-        target = Path(workspace).expanduser() if workspace else Path(self.workspace.root)
+        if workspace == "ungrouped":
+            # 「未分组」：不绑项目。给它一个真实目录（scratch），
+            # 这样沙箱照常生效，不用为它开特例。
+            from ..paths import scratch_dir
+
+            target = scratch_dir()
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                return {"ok": False, "error": f"建不出 scratch 目录：{exc}"}
+        else:
+            target = Path(workspace).expanduser() if workspace else Path(self.workspace.root)
         if not target.is_dir():
             return {"ok": False, "error": f"工作区不存在：{target}"}
 
@@ -1422,6 +1450,12 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/workspaces":
             payload = self._body()
+            if payload.get("default"):
+                result = self.app.update_settings(
+                    {"default_workspace": payload.get("path") or ""}
+                )
+                self._json({"ok": result.get("ok", False), **result})
+                return
             result = self.app.add_workspace(str(payload.get("path") or ""))
             self._json(result, 200 if result.get("ok") else 400)
             return

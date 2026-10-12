@@ -200,7 +200,13 @@ class Registry:
         self.save()
 
     def set_default(self, path: str | Path) -> None:
-        self.default_workspace = str(Path(path).expanduser())
+        """设默认工作区。**空串表示「没设」**，不是「当前目录」。
+
+        ``str(Path(""))`` 是 ``"."``，直接存下去会把默认工作区变成
+        「启动时所在目录」——那是随启动位置变的东西，正是要避免的。
+        """
+        raw = str(path or "").strip()
+        self.default_workspace = str(Path(raw).expanduser()) if raw else ""
         self.save()
 
     def effective_default(self) -> str:

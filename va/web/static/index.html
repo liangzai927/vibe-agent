@@ -301,6 +301,13 @@
   }
   .sess-more:hover { text-decoration: underline; }
 
+  .ws-head .ws-add {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 13px; line-height: 1; padding: 0 3px; display: none;
+  }
+  .ws-head:hover .ws-add { display: inline-block; }
+  .ws-head .ws-add:hover { color: var(--accent); }
+
 </style>
 </head>
 <body>
@@ -427,6 +434,17 @@ projects/&lt;项目名-哈希&gt;/sessions/      这个项目的对话记录</pr
             <span>每次回复后自动同步</span>
           </label>
 
+        </div>
+      </div>
+
+      <div class="field">
+        <label>默认工作区</label>
+        <div class="desc">
+          不选项目时新会话用哪个目录。留空则用数据目录下的 <code>workspace/</code>。
+        </div>
+        <div class="row-after">
+          <button id="set-default-workspace">选择文件夹…</button>
+          <span class="hint-inline" id="set-default-workspace-path"></span>
         </div>
       </div>
 
@@ -828,6 +846,15 @@ async function loadSidebar() {
     return;
   }
 
+  // 「未分组」常驻——它是「不选项目直接开一个」的入口，
+  // 没有会话时也得能点，否则第一次根本进不去
+  if (!blocks.some((b) => b.kind === "ungrouped")) {
+    blocks.push({
+      kind: "ungrouped", slug: "ungrouped", name: "未分组",
+      path: "", exists: true, sessions: [],
+    });
+  }
+
   list.innerHTML = "";
   for (const block of blocks) {
     const key = block.slug || block.name;
@@ -844,12 +871,17 @@ async function loadSidebar() {
     head.innerHTML =
       `<span class="caret">${isCollapsed ? "▸" : "▾"}</span>` +
       `<span class="ws-name">${escapeHtml(block.name)}</span>` +
-      `<span class="ws-count">${total}</span>`;
+      `<span class="ws-count">${total}</span>` +
+      `<button class="ws-add" title="在这个工作区里新建会话">＋</button>`;
     // 点标题折叠/展开——折叠之后不显示里面的会话
     head.addEventListener("click", () => {
       if (collapsed.has(key)) collapsed.delete(key);
       else collapsed.add(key);
       loadSidebar();
+    });
+    head.querySelector(".ws-add").addEventListener("click", (ev) => {
+      ev.stopPropagation();   // 别顺手把这块折叠了
+      newSession(block.kind === "ungrouped" ? "ungrouped" : block.path);
     });
     wrap.appendChild(head);
 
@@ -966,11 +998,13 @@ async function removeSession(session) {
   await refreshHead();
 }
 
-async function newSession() {
+async function newSession(workspace) {
+  // 不传 workspace 就建在**当前会话的工作区**里；
+  // 传 "ungrouped" 建到未分组；传路径就建到那个工作区。
   const result = await fetch("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),   // 默认建在当前会话的工作区里
+    body: JSON.stringify(workspace ? { workspace } : {}),
   }).then((r) => r.json());
   if (!result.ok) {
     pushNote("warn", result.error || "新建失败");
@@ -1001,6 +1035,19 @@ async function addWorkspace() {
     return;
   }
   await loadSidebar();
+}
+
+async function setDefaultWorkspace() {
+  const picked = await fetch("/api/pick-folder?prompt=" + encodeURIComponent("选择默认工作区"))
+    .then((r) => r.json()).catch(() => null);
+  if (!picked || !picked.ok) return;
+  const result = await fetch("/api/workspaces", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ default: true, path: picked.path }),
+  }).then((r) => r.json());
+  $("set-msg").textContent = result.ok ? "✓ 默认工作区已设置" : "✗ " + (result.error || "");
+  if (result.ok) await loadSidebar();
 }
 
 async function openSession(sessionId) {
@@ -1717,6 +1764,7 @@ $("set-session-dir").addEventListener("input", (e) => {
 
 $("new-session").addEventListener("click", newSession);
 $("add-workspace").addEventListener("click", addWorkspace);
+$("set-default-workspace").addEventListener("click", setDefaultWorkspace);
 
 $("btn-settings").addEventListener("click", openSettings);
 $("settings-close").addEventListener("click", closeSettings);

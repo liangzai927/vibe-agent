@@ -365,3 +365,84 @@ class TestWorkspaceManagement(SwitchTestCase):
     def test_remove_unknown(self):
         app = self.app_with(self.make("p1", "A", "a"))
         self.assertFalse(app.remove_workspace("nope")["ok"])
+
+
+class TestUngroupedSessions(SwitchTestCase):
+    """「不选项目直接开一个」。
+
+    未分组会话也有一个**真实目录**（scratch），所以沙箱照常生效——
+    不为它开任何特例。
+    """
+
+    def test_ungrouped_lands_in_scratch(self):
+        from va.paths import scratch_dir
+
+        app = self.app_with(self.make("p1", "A", "a"))
+        result = app.create_session("ungrouped")
+        self.assertTrue(result["ok"], result.get("error"))
+        # 两边都 resolve：macOS 上 /var 是 /private/var 的软链
+        self.assertEqual(Path(app.workspace.root).resolve(), Path(scratch_dir()).resolve())
+
+    def test_scratch_is_created_on_demand(self):
+        """第一次用的时候 scratch 可能还不存在。"""
+        import shutil
+
+        from va.paths import scratch_dir
+
+        shutil.rmtree(scratch_dir(), ignore_errors=True)
+        app = self.app_with(self.make("p1", "A", "a"))
+        self.assertTrue(app.create_session("ungrouped")["ok"])
+        self.assertTrue(scratch_dir().is_dir())
+
+    def test_ungrouped_session_is_grouped_as_ungrouped(self):
+        from va.projects import GROUP_UNGROUPED, group_sessions, index_sessions
+
+        app = self.app_with(self.make("p1", "A", "a"))
+        app.create_session("ungrouped")
+
+        grouped = group_sessions(index_sessions())
+        ids = [e.id for e in grouped[GROUP_UNGROUPED]]
+        self.assertIn(app.active_id, ids)
+
+    def test_creating_in_one_workspace_does_not_affect_another(self):
+        """在项目乙建一条，项目甲的数量不该变。"""
+        from va.projects import GROUP_WORKSPACE, group_sessions, index_sessions
+
+        self.make("p1", "甲一", "a")
+        other = self.root / "p2"
+        other.mkdir()
+        app = self.app_with(self.make("p1", "甲二", "b"))
+        before = len(group_sessions(index_sessions())[GROUP_WORKSPACE])
+
+        app.create_session(str(other))
+
+        after = len(group_sessions(index_sessions())[GROUP_WORKSPACE])
+        self.assertEqual(after, before + 1)
+
+
+class TestDefaultWorkspace(SwitchTestCase):
+    def test_default_can_be_set_and_read(self):
+        from va.projects import Registry
+
+        app = self.app_with(self.make("p1", "A", "a"))
+        target = self.root / "p1"
+        result = app.update_settings({"default_workspace": str(target)})
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(Path(Registry.load().effective_default()), target)
+
+    def test_setting_default_rejects_a_non_directory(self):
+        app = self.app_with(self.make("p1", "A", "a"))
+        result = app.update_settings({"default_workspace": str(self.root / "nope")})
+        self.assertFalse(result["ok"])
+        self.assertIn("不是有效目录", result["error"])
+
+    def test_clearing_falls_back_to_the_data_root(self):
+        from va.paths import default_workspace_dir
+        from va.projects import Registry
+
+        app = self.app_with(self.make("p1", "A", "a"))
+        app.update_settings({"default_workspace": str(self.root / "p1")})
+        app.update_settings({"default_workspace": ""})
+        self.assertEqual(
+            Path(Registry.load().effective_default()), default_workspace_dir()
+        )
