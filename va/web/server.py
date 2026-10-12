@@ -896,17 +896,26 @@ class WebApp:
                     continue
                 if any(part.startswith(".") and part not in (".github",) for part in parts[:-1]):
                     continue
-                if not path.is_file():
-                    continue
-                text = str(rel)
-                score = _fuzzy_score(query, text.lower()) if query else 1
+                # 目录也列出来——`@src` 引用整个目录是有用的，
+                # 而且补全到目录能继续往下点（`@src/` 再补全）
+                is_dir = path.is_dir()
+                text = str(rel) + ("/" if is_dir else "")
+                score = _fuzzy_score(query, str(rel).lower()) if query else 1
+                if is_dir and query:
+                    # 目录降权，但**只在有关键词时**——空查询下
+                    # 1-5 会变成负数被整个滤掉，结果就是「选不到文件夹」。
+                    score -= 5
                 if score > 0:
-                    found.append((score, text))
+                    found.append((score, text, is_dir))
         except OSError:
             pass
 
         found.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
-        return {"files": [name for _, name in found[:limit]]}
+        return {
+            "files": [
+                {"path": name, "dir": is_dir} for _, name, is_dir in found[:limit]
+            ]
+        }
 
     def add_workspace(self, path: str) -> dict[str, Any]:
         """把一个文件夹加进注册表。

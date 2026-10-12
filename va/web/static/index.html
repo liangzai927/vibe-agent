@@ -337,6 +337,11 @@
     font-family: var(--mono); user-select: none;
   }
   .ref-chip .chip-icon { color: var(--accent); font-size: 10px; }
+  .ref-chip.dir { background: #3a2f1f; border-color: #6b5527; color: #ffd479; }
+  .ref-chip.dir .chip-icon { color: #ffb347; }
+  .refs div { display: flex; gap: 6px; align-items: center; }
+  .refs div .ri { color: var(--muted); font-size: 10px; width: 10px; }
+  .refs div.is-dir .ri { color: #ffb347; }
 
 </style>
 </head>
@@ -891,16 +896,18 @@ function setEditorText(text) {
   if (text) editor.appendChild(document.createTextNode(text));
 }
 
-function makeChip(path) {
+function makeChip(path, isDir = false) {
   const chip = document.createElement("span");
-  chip.className = "ref-chip";
+  chip.className = "ref-chip" + (isDir ? " dir" : "");
   chip.contentEditable = "false";
-  chip.dataset.path = path;
-  chip.title = path;
-  // 只显示文件名，路径放进 title——一行里放不下长路径
+  chip.dataset.path = path.replace(/\/$/, "");   // 补全给目录带了斜杠，存的时候去掉
+  chip.dataset.dir = isDir ? "1" : "";
+  chip.title = chip.dataset.path + (isDir ? "（目录）" : "");
+  // 只显示名字，完整路径放进 title——一行里放不下长路径
+  const name = chip.dataset.path.split("/").filter(Boolean).pop() || chip.dataset.path;
   chip.innerHTML =
-    `<span class="chip-icon">◈</span>` +
-    `<span class="chip-name">${escapeHtml(path.split("/").pop())}</span>`;
+    `<span class="chip-icon">${isDir ? "▸" : "◈"}</span>` +
+    `<span class="chip-name">${escapeHtml(name)}</span>`;
   return chip;
 }
 
@@ -913,11 +920,13 @@ function placeCaretAfter(node) {
   selection.addRange(range);
 }
 
-function insertChip(path) {
+function insertChip(item) {
+  const path = typeof item === "string" ? item : item.path;
+  const isDir = typeof item === "string" ? false : !!item.dir;
   const editor = $("input");
   const selection = window.getSelection();
   if (!selection.rangeCount) {
-    editor.appendChild(makeChip(path));
+    editor.appendChild(makeChip(path, isDir));
     editor.appendChild(document.createTextNode(" "));
     return;
   }
@@ -953,7 +962,7 @@ function insertChip(path) {
     }
   }
 
-  const chip = makeChip(path);
+  const chip = makeChip(path, isDir);
   const space = document.createTextNode(" ");
   range.insertNode(space);
   range.insertNode(chip);
@@ -1014,7 +1023,11 @@ function renderRefs() {
   }
   const el = $("refs");
   el.innerHTML = refItems
-    .map((name, i) => `<div class="${i === refIndex ? "on" : ""}" data-i="${i}">${escapeHtml(name)}</div>`)
+    .map((item, i) => {
+      const icon = item.dir ? "▸" : "◈";
+      const cls = (i === refIndex ? "on " : "") + (item.dir ? "is-dir" : "");
+      return `<div class="${cls}" data-i="${i}"><span class="ri">${icon}</span>${escapeHtml(item.path)}</div>`;
+    })
     .join("");
   el.classList.remove("off");
   positionRefs();
@@ -1062,11 +1075,17 @@ async function updateRefs() {
   const files = await loadFileCache();
   const lower = query.toLowerCase();
   refItems = files
-    .map((name) => [fuzzyScore(lower, name.toLowerCase()), name])
+    .map((item) => {
+      // 和服务端同一条规则：**只在有关键词时**给目录降权。
+      // 空查询下 1-5 会变成负数被滤掉，「打开补全看不到文件夹」。
+      const base = fuzzyScore(lower, item.path.toLowerCase());
+      const score = item.dir && lower ? base - 5 : base;
+      return [score, item];
+    })
     .filter(([score]) => score > 0)
-    .sort((a, b) => b[0] - a[0] || a[1].length - b[1].length || a[1].localeCompare(b[1]))
+    .sort((a, b) => b[0] - a[0] || a[1].path.length - b[1].path.length || a[1].path.localeCompare(b[1].path))
     .slice(0, 20)
-    .map(([, name]) => name);
+    .map(([, item]) => item);
   refIndex = 0;
   renderRefs();
 }

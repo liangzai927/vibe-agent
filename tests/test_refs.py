@@ -133,27 +133,54 @@ class TestFindFiles(AgentTestCase):
             path.write_text("x", encoding="utf-8")
         self.app = WebApp(self.cfg, self.workspace)
 
+    def paths(self, query: str) -> list[str]:
+        return [item["path"] for item in self.app.find_files(query)["files"]]
+
     def test_skips_noise_directories(self):
-        files = self.app.find_files("")["files"]
+        files = self.paths("")
         self.assertNotIn("node_modules/x/y.ts", files)
         self.assertNotIn(".git/config", files)
 
     def test_prefix_match_beats_a_later_occurrence(self):
         """打 `auth` 时 `src/auth.ts` 该排在 `src/authoring.md` 前面。"""
-        files = self.app.find_files("auth")["files"]
-        self.assertEqual(files[0], "src/auth.ts")
+        self.assertEqual(self.paths("auth")[0], "src/auth.ts")
 
     def test_fuzzy_matches_a_directory_name(self):
-        self.assertIn("src/utils/date.ts", self.app.find_files("utils")["files"])
+        self.assertIn("src/utils/date.ts", self.paths("utils"))
 
     def test_fuzzy_matches_a_scattered_subsequence(self):
-        self.assertIn("README.md", self.app.find_files("read")["files"])
+        self.assertIn("README.md", self.paths("read"))
 
     def test_no_match_returns_empty(self):
-        self.assertEqual(self.app.find_files("zzzzz")["files"], [])
+        self.assertEqual(self.paths("zzzzz"), [])
 
     def test_leading_at_is_tolerated(self):
-        self.assertIn("src/auth.ts", self.app.find_files("@auth")["files"])
+        self.assertIn("src/auth.ts", self.paths("@auth"))
+
+    def test_directories_are_listed(self):
+        """**用户报过这个**：@ 只能选文件，选不了文件夹。"""
+        items = {item["path"]: item["dir"] for item in self.app.find_files("")["files"]}
+        self.assertTrue(items.get("node_modules/") is None, "噪声目录不该出现")
+        self.assertIn("src/", items)
+        self.assertTrue(items["src/"], "src/ 应该被标成目录")
+
+    def test_directories_are_not_filtered_out_by_the_empty_query(self):
+        """空查询给目录降权，1-5 会变负数被整个滤掉——
+        结果就是「打开补全看不到任何文件夹」。"""
+        self.assertTrue(any(item["dir"] for item in self.app.find_files("")["files"]))
+
+    def test_directories_sort_after_files_when_the_query_matches_both(self):
+        """打 `src` 时多半想找里面的文件；目录排后面但仍然在。"""
+        items = self.app.find_files("src")["files"]
+        dirs = [i for i in items if i["dir"]]
+        self.assertTrue(dirs, "目录不该被挤掉")
+        self.assertFalse(items[0]["dir"], "文件应排在目录前面")
+
+    def test_directory_paths_end_with_a_slash(self):
+        """补全到目录时能接着往下点（`@src/` 再补全）。"""
+        for item in self.app.find_files("src")["files"]:
+            if item["dir"]:
+                self.assertTrue(item["path"].endswith("/"), item["path"])
 
 
 if __name__ == "__main__":
