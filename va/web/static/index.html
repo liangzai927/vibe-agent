@@ -753,6 +753,19 @@ async function answerApproval(id, answer, card) {
 let sessionInfo = null;
 let headBase = "";
 
+async function refreshHead() {
+  // 切换会话之后工作区变了，顶部必须跟着更新——
+  // 这是「agent 现在能碰哪」的唯一提示，不能留着上一次的。
+  try {
+    const state = await fetch("/api/state").then((r) => r.json());
+    headBase = `<b>${escapeHtml(state.model)}</b> · ${escapeHtml(state.workspace)}`;
+    renderHead();
+    setStatus(state.busy);
+  } catch (err) {
+    /* 取不到就留着旧的，不打断操作 */
+  }
+}
+
 function renderHead() {
   // 头部**唯一**的渲染入口。多处各写各的，后到的那次就会把别的内容冲掉。
   if (!headBase) return;
@@ -807,6 +820,7 @@ async function loadSidebar() {
       row.className = "sess" + (session.active ? " active" : "");
       row.title = session.workspace || block.path;
       row.dataset.id = session.id;
+      row.addEventListener("click", () => openSession(session.id));
       row.innerHTML =
         `<div class="s-title"><span>${escapeHtml(session.title)}</span>` +
         `<span class="s-when">${escapeHtml(session.when)}</span></div>` +
@@ -834,6 +848,39 @@ async function showStorage() {
   for (const row of problems) {
     pushNote("warn", `${row.label}：${row.value}${row.hint ? "（" + row.hint + "）" : ""}`);
   }
+}
+
+async function openSession(sessionId) {
+  if (!sessionId) return;
+  if (sessionId === (sessionInfo && sessionInfo.id)) return;   // 已经在这条里
+
+  // 切换时先清空对话区——不然新旧历史会叠在一起
+  $("stream").innerHTML = "";
+  current = null;
+  currentKind = null;
+  lastTool = null;
+  sessionInfo = null;
+
+  let result;
+  try {
+    result = await fetch(
+      `/api/sessions/${encodeURIComponent(sessionId)}/open`, { method: "POST" }
+    ).then((r) => r.json());
+  } catch (err) {
+    pushNote("error", "切换失败：" + err);
+    return;
+  }
+
+  if (!result.ok) {
+    // 最常见的原因：另一个会话还在跑。服务端会说明白，直接显示出来
+    pushNote("warn", result.error || "切换失败");
+    await loadSidebar();
+    return;
+  }
+
+  await loadHistory();
+  await loadSidebar();
+  await refreshHead();
 }
 
 async function loadHistory() {

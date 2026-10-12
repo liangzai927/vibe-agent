@@ -165,12 +165,17 @@ class WebUI(UI):
         bus: EventBus,
         gate: ApprovalGate,
         *,
+        session_id: str = "",
         auto_approve: bool = False,
         show_thinking: bool = True,
     ) -> None:
         super().__init__(workspace, auto_approve=auto_approve, show_thinking=show_thinking)
         self.bus = bus
         self.gate = gate
+        # 事件带上会话标识：多个会话共用一条事件流，前端靠它分流。
+        # 在**发出去的地方**统一打标，而不是让每个调用点自己记得加——
+        # 漏一个就会出现「不知道哪来的消息」。
+        self.session_id = session_id
         self._buffer: list[str] = []
         self._buffer_kind = "text"
         # 必须是「现在」而不是 0——用 0 的话第一次推送就会被判定为过期，
@@ -178,6 +183,16 @@ class WebUI(UI):
         self._buffer_at = time.monotonic()
         self._open_message = False
         self._lock = threading.Lock()
+
+    def _emit(self, event_type: str, **payload: Any) -> int:
+        """统一出口：盖上会话标识再发。
+
+        多个会话共用一条事件流，前端靠 `session` 分流。在**出口**打标
+        而不是让 18 个调用点各自记得加——漏一个就会出现「不知道哪来的消息」。
+        """
+        if self.session_id:
+            payload.setdefault("session", self.session_id)
+        return self.bus.publish(event_type, **payload)
 
     # ------------------------------------------------------------- 流式缓冲
 
@@ -189,7 +204,7 @@ class WebUI(UI):
             kind = self._buffer_kind
             self._buffer.clear()
             self._buffer_at = time.monotonic()
-        self.bus.publish("thinking_delta" if kind == "thinking" else "text_delta", piece=piece)
+        self._emit("thinking_delta" if kind == "thinking" else "text_delta", piece=piece)
 
     def _push(self, kind: str, piece: str) -> None:
         if not piece:
@@ -212,12 +227,12 @@ class WebUI(UI):
         # 前端会凭空断出一段。
         if self._open_message:
             self._open_message = False
-            self.bus.publish("message_end")
+            self._emit("message_end")
 
     # ------------------------------------------------------------- 基础
 
     def banner(self, model: str, base_url: str, session_id: str | None = None) -> None:
-        self.bus.publish(
+        self._emit(
             "banner",
             model=model,
             base_url=base_url,
@@ -227,19 +242,19 @@ class WebUI(UI):
 
     def info(self, text: str) -> None:
         self._end_message()
-        self.bus.publish("note", level="info", text=text)
+        self._emit("note", level="info", text=text)
 
     def warn(self, text: str) -> None:
         self._end_message()
-        self.bus.publish("note", level="warn", text=text)
+        self._emit("note", level="warn", text=text)
 
     def error(self, text: str) -> None:
         self._end_message()
-        self.bus.publish("note", level="error", text=text)
+        self._emit("note", level="error", text=text)
 
     def success(self, text: str) -> None:
         self._end_message()
-        self.bus.publish("note", level="success", text=text)
+        self._emit("note", level="success", text=text)
 
     # ------------------------------------------------------------- 流式
 
@@ -272,13 +287,13 @@ class WebUI(UI):
 
     def tool_call(self, index: int, total: int, name: str, summary: str) -> None:
         self._end_message()
-        self.bus.publish(
+        self._emit(
             "tool_call", index=index, total=total, name=name, summary=summary
         )
 
     def tool_result(self, text: str, ok: bool) -> None:
         lines = text.strip().splitlines() or ["(空)"]
-        self.bus.publish(
+        self._emit(
             "tool_result",
             ok=ok,
             text="\n".join(lines[:60]),
@@ -288,19 +303,19 @@ class WebUI(UI):
 
     def show_plan(self, plan: Any) -> None:
         self._end_message()
-        self.bus.publish("plan", text=plan.render())
+        self._emit("plan", text=plan.render())
 
     def block(self, title: str, rows: list[tuple[str, str]]) -> None:
         self._end_message()
-        self.bus.publish("block", title=title, rows=[[k, v] for k, v in rows])
+        self._emit("block", title=title, rows=[[k, v] for k, v in rows])
 
     def horizontal_rule(self, label: str = "") -> None:
         self._end_message()
-        self.bus.publish("rule", label=label)
+        self._emit("rule", label=label)
 
     def answer(self, text: str) -> None:
         self._end_message()
-        self.bus.publish("answer", text=text)
+        self._emit("answer", text=text)
 
     # ------------------------------------------------------------- 审批
 
@@ -314,7 +329,7 @@ class WebUI(UI):
         self._end_message()
 
         if self.auto_approve or tool_name in self._always_allow:
-            self.bus.publish(
+            self._emit(
                 "note", level="warn", text=f"自动批准 {tool_name}  {detail}"
             )
             return True
@@ -329,13 +344,13 @@ class WebUI(UI):
         }
 
         def announce(request_id: str) -> None:
-            self.bus.publish("approval", id=request_id, **payload)
+            self._emit("approval", id=request_id, **payload)
 
         request_id, answer = self.gate.request(announce)
-        self.bus.publish("approval_done", id=request_id, answer=answer)
+        self._emit("approval_done", id=request_id, answer=answer)
 
         if answer == "timeout":
-            self.bus.publish(
+            self._emit(
                 "note", level="error", text=f"审批超时（{tool_name}），按拒绝处理"
             )
             return False
@@ -346,7 +361,7 @@ class WebUI(UI):
 
     def show_diff(self, diff_text: str) -> None:
         self._end_message()
-        self.bus.publish("diff", text=strip_ansi(diff_text))
+        self._emit("diff", text=strip_ansi(diff_text))
 
     # ------------------------------------------------------------- 其他
 

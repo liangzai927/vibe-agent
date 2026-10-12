@@ -20,6 +20,7 @@ import mimetypes
 import os
 import socket
 import threading
+from dataclasses import dataclass, field
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,6 +51,34 @@ HELP_TEXT = """可用命令：
 /help            显示这份帮助"""
 
 
+@dataclass
+class SessionRuntime:
+    """一个会话的全部运行时状态。
+
+    **为什么要保留多个而不是切换时重建**：撤销栈只在内存里
+    （``UndoStack._stack``），重建就等于把 ``/undo`` 历史扔了。
+    而撤销是改代码时最需要的东西之一。
+
+    消息和计划在会话文件里，重建能恢复；撤销不行。所以留着。
+
+    代价是内存——每个 agent 持完整消息历史。用 LRU 限制同时活着的数量，
+    被挤掉的会话下次切换时重建（丢撤销历史，但那是很久没碰的会话）。
+    """
+
+    id: str
+    workspace: Workspace
+    ui: "WebUI"
+    agent: Agent
+    store: Any = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    worker: threading.Thread | None = None
+    last_used: float = field(default_factory=time.time)
+
+    @property
+    def busy(self) -> bool:
+        return self.worker is not None and self.worker.is_alive()
+
+
 class WebApp:
     """把 agent、事件总线、审批闸门绑在一起，供 HTTP 层调用。"""
 
@@ -72,13 +101,23 @@ class WebApp:
         self.workspace = workspace
         self.bus = EventBus()
         self.gate = ApprovalGate()
-        self.ui = WebUI(
+        # 每个会话一套（workspace + ui + agent）。切换会话只是重新指向，
+        # 所以撤销栈、计划、打转记录都留着。
+        self.runtimes: dict[str, SessionRuntime] = {}
+        self._runtime_limit = 5
+        self.active_id = ""
+        self._llm = llm
+        self._auto_approve = auto_approve
+
+        # 还没开会话时的兜底 UI：命令（/help、/models）也得能答
+        self._fallback_ui = WebUI(
             workspace,
             self.bus,
             self.gate,
             auto_approve=auto_approve,
             show_thinking=cfg.show_thinking,
         )
+        self.ui = self._fallback_ui
         self.agent = Agent(
             cfg,
             self.ui,
@@ -90,13 +129,136 @@ class WebApp:
             undo=undo,
             plan=plan,
         )
-        self._task_lock = threading.Lock()
-        self._worker: threading.Thread | None = None
-        self.started_at = time.time()
+        self._adopt(self.agent, workspace, session, self.ui)
+
         self.env_path = env_path or Config.env_file(AGENT_DIR)
         # 和 env_path 一样可以重定向。测试必须能把这些指到临时目录去——
         # 不然「跑一次测试」就会把开发者真实的配置和模型缓存冲掉。
         self.models_dir = models_dir or AGENT_DIR
+
+    # ------------------------------------------------------------- 会话运行时
+
+    def _adopt(
+        self,
+        agent: Agent,
+        workspace: Workspace,
+        session: Any,
+        ui: "WebUI",
+    ) -> SessionRuntime:
+        """把一个已建好的 agent 收进运行时表，并设为 active。"""
+        session_id = ""
+        if session is not None:
+            session_id = getattr(session.meta, "id", "") or ""
+        if not session_id:
+            session_id = f"live-{int(time.time() * 1000)}"
+
+        # 首个会话复用的是构造时那个兜底 UI，它没有会话标识——
+        # 补上，否则它发出的事件前端没法归类
+        if not getattr(ui, "session_id", ""):
+            ui.session_id = session_id
+
+        runtime = SessionRuntime(
+            id=session_id,
+            workspace=workspace,
+            ui=ui,
+            agent=agent,
+            store=session,
+        )
+        self.runtimes[session_id] = runtime
+        self._activate(session_id)
+        return runtime
+
+    def _activate(self, session_id: str) -> None:
+        """把 active 指向某个运行时。
+
+        **整个切换就是这几行赋值。** 别处一律用 ``self.agent`` /
+        ``self.ui`` / ``self.workspace``，所以不用改任何现有代码。
+        """
+        runtime = self.runtimes.get(session_id)
+        if runtime is None:
+            return
+        runtime.last_used = time.time()
+        self.active_id = session_id
+        self.agent = runtime.agent
+        self.ui = runtime.ui
+        self.workspace = runtime.workspace
+        self._evict()
+
+    def _evict(self) -> None:
+        """内存里最多留 ``_runtime_limit`` 个会话，挤掉最久没用的。
+
+        被挤掉的会话下次切换时重建——消息和计划从文件恢复，
+        **撤销栈会丢**（它只在内存里）。这是刻意的取舍：撤销最有用的是
+        「刚刚那几步」，而刚刚用过的会话不会被挤掉。
+        """
+        if len(self.runtimes) <= self._runtime_limit:
+            return
+        ordered = sorted(self.runtimes.values(), key=lambda r: r.last_used)
+        for runtime in ordered:
+            if len(self.runtimes) <= self._runtime_limit:
+                break
+            if runtime.id == self.active_id or runtime.busy:
+                continue
+            self.runtimes.pop(runtime.id, None)
+
+    def active(self) -> SessionRuntime | None:
+        return self.runtimes.get(self.active_id)
+
+    def open_session(self, session_id: str) -> dict[str, Any]:
+        """切到某个会话。已经在内存里就直接指过去，否则从磁盘重建。"""
+        session_id = (session_id or "").strip()
+        if not session_id:
+            return {"ok": False, "error": "没指定会话"}
+
+        if session_id in self.runtimes:
+            self._activate(session_id)
+            return {"ok": True, "session": self.session_info(), "reused": True}
+
+        from ..projects import index_sessions as _index_sessions
+
+        entry = next((e for e in _index_sessions() if e.id == session_id), None)
+        if entry is None:
+            return {"ok": False, "error": f"找不到会话 {session_id}"}
+        if not entry.workspace:
+            return {"ok": False, "error": "这条会话没记工作区，打不开"}
+
+        try:
+            workspace = Workspace(
+                entry.workspace,
+                extra_read_roots=self.cfg.read_dirs,
+                read_scope=self.cfg.read_scope,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"工作区打不开：{exc}"}
+
+        try:
+            store = SessionStore.open(Path(entry.workspace), session_id)
+            _, history, plan = store.load()
+        except (OSError, FileNotFoundError) as exc:
+            return {"ok": False, "error": f"读不了这条会话：{exc}"}
+
+        ui = WebUI(
+            workspace,
+            self.bus,
+            self.gate,
+            session_id=session_id,
+            auto_approve=self._auto_approve,
+            show_thinking=self.cfg.show_thinking,
+        )
+        agent = Agent(
+            self.cfg,
+            ui,
+            workspace=workspace,
+            llm=self._llm,
+            session=store,
+            history=history,
+            plan=plan,
+        )
+        self.runtimes[session_id] = SessionRuntime(
+            id=session_id, workspace=workspace, ui=ui, agent=agent, store=store
+        )
+        self._activate(session_id)
+        return {"ok": True, "session": self.session_info(), "reused": False}
 
     # ------------------------------------------------------------- 设置
 
@@ -392,7 +554,20 @@ class WebApp:
 
     @property
     def busy(self) -> bool:
-        return self._worker is not None and self._worker.is_alive()
+        """**当前会话**在不在跑。"""
+        runtime = self.active()
+        return runtime.busy if runtime else False
+
+    def any_busy(self) -> SessionRuntime | None:
+        """有没有**任何**会话在跑。有就返回那个运行时。
+
+        按定下的运行模型，同一时刻只跑一个任务。否则两个 agent 可能同时
+        改一个项目——出问题的方式比单线程多得多，而且很难查。
+        """
+        for runtime in self.runtimes.values():
+            if runtime.busy:
+                return runtime
+        return None
 
     def state(self) -> dict[str, Any]:
         return {
@@ -415,31 +590,56 @@ class WebApp:
         text = (text or "").strip()
         if not text:
             return False, "空消息"
-        if self.busy:
-            return False, "上一个任务还在跑，等它结束"
+        running = self.any_busy()
+        if running is not None:
+            if running.id == self.active_id:
+                return False, "上一个任务还在跑，等它结束"
+            return False, (
+                f"另一个会话（{running.id[:12]}）还在跑。"
+                f"同一时刻只跑一个任务——先等它结束，或者切过去看看"
+            )
         if text.startswith("/"):
             return self._command(text)
 
-        self.bus.publish("user", text=text)
-        self._worker = threading.Thread(
-            target=self._run, args=(text,), name="va-task", daemon=True
+        runtime = self.active()
+        if runtime is None:
+            return False, "没有打开的会话"
+
+        runtime.ui._emit("user", text=text)
+        runtime.worker = threading.Thread(
+            target=self._run,
+            args=(runtime, text),
+            name=f"va-task-{runtime.id[:12]}",
+            daemon=True,
         )
-        self._worker.start()
+        runtime.worker.start()
         return True, "已开始"
 
-    def _run(self, text: str) -> None:
-        with self._task_lock:
+    def _run(self, runtime: SessionRuntime, text: str) -> None:
+        """跑一个会话的任务。
+
+        **运行时是参数传进来的**，不读 ``self.active()``——用户可能在任务
+        跑到一半切走，那时 ``self.agent`` 已经指向别的会话了，
+        再拿它去跑就等于把两个会话的消息搅在一起。
+        """
+        with runtime.lock:
             try:
-                answer = self.agent.run(text)
+                answer = runtime.agent.run(text)
             except Exception as exc:  # noqa: BLE001 - 任何异常都要让界面知道
-                self.bus.publish(
+                runtime.ui._emit(
                     "note", level="error", text=f"{type(exc).__name__}: {exc}"
                 )
                 answer = ""
-            self.bus.publish("task_end", answer=answer or "")
+            runtime.ui._emit("task_end", answer=answer or "")
 
             # 回复结束 → 自动同步（后台线程，不阻塞界面）
             self.auto_sync_now()
+
+    @property
+    def _worker(self) -> threading.Thread | None:
+        """当前会话的 worker。保留这个名字是为了不动 `busy` 等已有代码。"""
+        runtime = self.active()
+        return runtime.worker if runtime else None
 
     def history(self) -> list[dict[str, Any]]:
         """把已加载的会话记录转成界面能直接渲染的列表。
@@ -1049,6 +1249,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/open"):
+            from urllib.parse import unquote as _unquote
+
+            session_id = _unquote(
+                parsed.path[len("/api/sessions/") : -len("/open")].strip("/")
+            )
+            result = self.app.open_session(session_id)
+            self._json(result, 200 if result.get("ok") else 404)
+            return
+
 
         if parsed.path == "/api/message":
             payload = self._body()
