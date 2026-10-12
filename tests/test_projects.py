@@ -310,3 +310,94 @@ class TestSessionIndexApi(AgentTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestIndexFollowsTheDataRoot(unittest.TestCase):
+    """**这是用户实际踩到的坑。**
+
+    配了 ``VA_DATA_REMOTE`` 之后，会话数据在**仓库的克隆**里
+    （``<克隆>/projects/<slug>/sessions/``），不在本地的
+    ``~/.vibe-agent/projects``。索引如果扫错地方，表现就是
+    「明明有会话，侧栏是空的」，而且新建的也不出现——
+    看起来像「工作区里建不了会话」。
+    """
+
+    def setUp(self) -> None:
+        import shutil
+        import tempfile
+
+        self.tmp = Path(tempfile.mkdtemp())
+        self.home = self.tmp / "home"
+        self.workspace = self.tmp / "proj"
+        self.workspace.mkdir(parents=True)
+        self.origin = self.tmp / "ai-memory.git"
+
+        self._saved = os.environ.get("VA_HOME")
+        os.environ["VA_HOME"] = str(self.home)
+        self._saved_remote = os.environ.get("VA_DATA_REMOTE")
+        os.environ.pop("VA_DATA_REMOTE", None)
+        self.addCleanup(self._restore)
+
+    def _restore(self) -> None:
+        if self._saved is not None:
+            os.environ["VA_HOME"] = self._saved
+        else:
+            os.environ.pop("VA_HOME", None)
+        if self._saved_remote is not None:
+            os.environ["VA_DATA_REMOTE"] = self._saved_remote
+        else:
+            os.environ.pop("VA_DATA_REMOTE", None)
+
+    def _use_remote(self) -> None:
+        import subprocess
+
+        from va.session_sync import ensure_clone
+
+        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
+        os.environ["VA_DATA_REMOTE"] = str(self.origin)
+        self.assertTrue(ensure_clone(str(self.origin), kind="data").ok)
+
+    def _make(self, title: str) -> None:
+        from va.session import SessionStore
+
+        store = SessionStore.create(str(self.workspace), "m")
+        store.set_title(title)
+        store.append_message({"role": "user", "content": f"{title} 的内容"})
+        store.append_end("done", 1)
+
+    def test_sessions_in_the_repo_clone_are_indexed(self):
+        self._use_remote()
+        self._make("仓库里的会话")
+
+        entries = index_sessions()
+        self.assertEqual(len(entries), 1, "没扫到仓库克隆里的会话")
+        self.assertEqual(entries[0].title, "仓库里的会话")
+
+    def test_index_and_write_agree_on_the_location(self):
+        """索引扫的地方必须和**写入**的地方一致。
+
+        两者不一致正是这个 bug 的本质：写进了克隆，索引却在看本地。
+        """
+        self._use_remote()
+        self._make("会话")
+
+        from va.paths import data_root
+        from va.session import SessionStore
+
+        written = SessionStore.default_dir(str(self.workspace))
+        self.assertTrue(str(written).startswith(str(data_root())), "写入位置不在数据根下")
+
+        found = index_sessions()[0].path
+        self.assertTrue(str(found).startswith(str(data_root())), "索引到的文件不在数据根下")
+        self.assertEqual(Path(found).parent, written, "索引和写入指的不是同一个目录")
+
+    def test_sidebar_groups_by_workspace_with_a_remote(self):
+        """用户报的第二个现象：工作区里看不到会话、也建不了。"""
+        self._use_remote()
+        self._make("一")
+        self._make("二")
+
+        entries = index_sessions()
+        self.assertEqual(len(entries), 2)
+        grouped = group_sessions(entries)
+        self.assertEqual(len(grouped[GROUP_WORKSPACE]), 2, "两条该在同一个工作区块里")

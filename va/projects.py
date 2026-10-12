@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .paths import (
-    agent_home,
+    data_root,
     default_workspace_dir,
     project_dir,
     project_slug,
@@ -327,7 +327,11 @@ def index_sessions(*, limit: int = 500) -> list[SessionEntry]:
     ``updated_at`` 用文件 mtime——会话每次追加都会更新它，
     比 meta 里的 ``updated_at``（只在特定时机才写）更贴近「上次活跃」。
     """
-    root = agent_home() / "projects"
+    # **必须是 data_root() 而不是 agent_home()**：配了记忆仓库时，
+    # 会话数据在仓库的克隆里（``<克隆>/projects/...``），
+    # 而不是本地的 ``~/.vibe-agent/projects``。扫错了地方就会
+    # 「明明有会话，侧栏是空的」——而且新建的也不出现。
+    root = data_root() / "projects"
     if not root.is_dir():
         return []
 
