@@ -292,6 +292,62 @@ branch:
 还会做跨字段检查，比如「门禁开着却没配任何测试」「要求带需求号但模板里
 没有 {ticket}」「配了就绪端口却没配启动命令」。
 
+### 提测（推送 / CI 校验 / 通知）
+
+**每一步都是可选的。没配就跳过、不报错、也不执行。**
+
+提测是往**外部**推东西——推错了收不回来。所以这里**不设「合理的默认值」**：
+没配 `target_branch` 就**不提测**，而不是「默认推到 test」。
+一个刚接入的项目不该因为跑了一次 `va workflow` 就被推到 test 分支去。
+
+```yaml
+# 什么都不配 → 直接结束：
+提测（配置为空，什么都没做）
+  · 目标分支：跳过（未配置 submit.target_branch）
+  · CI：跳过（同上，没有提测目标）
+  · 通知：跳过（同上）
+```
+
+```yaml
+# 配了之后
+submit:
+  target_branch: test          # 空 = 不提测
+  remote: origin
+  push_mode: direct            # merge_request 需平台 API，尚未实现
+  source_branch: ""            # 空 = 当前分支
+  require_gate: true           # 推之前过测试门禁
+  ci_command: npm run lint     # 本地校验，失败就停下不推
+  wait_for_ci: false           # 读远端 CI 状态需平台 API，尚未实现
+  notify_env: VA_TEST_WEBHOOK  # webhook 地址从哪个环境变量读
+  notify_template: "提测：{task} → {branch}"
+```
+
+```
+提测
+  ✓ 测试门禁：通过
+  ✓ 本地校验：通过
+  ✓ 推送：origin feature/ORD-1 → test
+  · CI：跳过（未配置 wait_for_ci）
+  · 通知：跳过（未配置 submit.notify_env）
+```
+
+**失败就停，后面的事不做**：
+
+```
+  ✓ 测试门禁：通过
+  ✗ 本地校验：失败（退出码 1）
+  · 推送：跳过（本地校验没过）
+
+**在「本地 CI 校验」这一步停下**——后面的事没做。
+```
+
+**没实现的能力明确说没实现**，不假装：`push_mode: merge_request` 和
+`wait_for_ci: true` 会明确告诉你「需要对接平台 API，这个能力还没实现」——
+默默改成 direct 推上去比报错更糟。
+
+**通知失败不影响提测本身**：代码已经推出去了，不能因为消息没发出去
+就说提测失败。所以那一步仍然算成功，只在说明里提一句。
+
 ### 样式还原（截图稳定化）
 
 **不做稳定化的话，像素差异的数字没有意义。** 时间是动的、动画截到中间帧、

@@ -17,6 +17,7 @@ from .plan import UpdatePlan
 from .remember import Remember
 from .browser import BROWSER_TOOLS
 from .mcp import MCP_TOOLS
+from .submit import SUBMIT_TOOLS
 from .task import TASK_TOOLS
 from .tests import RUN_TESTS_TOOL
 from .process import PROCESS_TOOLS
@@ -104,6 +105,8 @@ def build_registry(
         for tool_cls in RUN_TESTS_TOOL:
             registry.register(tool_cls(ctx))
         for tool_cls in TASK_TOOLS:
+            registry.register(tool_cls(ctx))
+        for tool_cls in SUBMIT_TOOLS:
             registry.register(tool_cls(ctx))
     if ctx is not None and ctx.can_delegate():
         for tool_cls in DELEGATE_TOOLS:

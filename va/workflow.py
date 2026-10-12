@@ -184,11 +184,35 @@ SCHEMA: dict[str, dict[str, Field]] = {
         ),
     },
     "submit": {
-        "target_branch": Field("test", str, "提测推送到哪个分支"),
-        "push_mode": Field("direct", str, "direct 直接推；merge_request 开 MR"),
+        # **全部留空 = 不提测，直接结束。**
+        # 每个口子都是可选的：没配就跳过并说明「跳过了」，不是报错。
+        # 提测是往外部推东西，不该有「默认帮你推到 test」这种行为。
+        "target_branch": Field(
+            "", str, "提测推到哪个分支。**留空 = 不提测**（直接结束，不报错）"
+        ),
+        "remote": Field("origin", str, "推到哪个远端"),
+        "push_mode": Field(
+            "direct", str, "direct 直接推；merge_request 开 MR（需要平台 API，暂未实现）"
+        ),
+        "source_branch": Field(
+            "", str, "从哪个分支提测。留空 = 当前分支"
+        ),
         "wait_for_ci": Field(False, bool, "推完是否等 CI 结果"),
+        "ci_command": Field(
+            "", str, "本地 CI 校验命令（可选）。留空则不跑"
+        ),
         "ci_timeout_minutes": Field(20, int, "等 CI 的最长分钟数"),
-        "notify_env": Field("", str, "提测通知的 webhook 地址从哪个环境变量读"),
+        "notify_env": Field(
+            "", str, "提测通知的 webhook 地址从哪个环境变量读。留空 = 不通知"
+        ),
+        "notify_template": Field(
+            "提测：{task} → {branch}",
+            str,
+            "通知内容模板。可用 {task} {branch} {commit} {status}",
+        ),
+        "require_gate": Field(
+            True, bool, "提测前要求测试门禁通过"
+        ),
     },
 }
 
