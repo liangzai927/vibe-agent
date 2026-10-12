@@ -1,18 +1,23 @@
-"""agent 自己的文件放在哪。
+"""agent 的数据放哪。
 
-**为什么不在工作区里**：用户的项目应该只有用户的代码。设计稿规格、渲染截图、
-上传的图片都是 agent 的中间产物——堆在项目里就是垃圾，`git status` 会一直脏着，
-`.gitignore` 还得用户自己想起来加。
+**为什么不在工作区里**：用户的项目应该只有用户的代码。会话记录、记忆、
+设计稿规格、渲染截图都是 agent 的东西——堆在项目里就是垃圾，
+``git status`` 会一直脏着。
 
-所以默认放到 ``~/.vibe-agent/``（可以用 ``VA_HOME`` 改）::
+所以全部放在一个**数据根**下（``VA_HOME`` 可以改）::
 
-    ~/.vibe-agent/
-    ├── inbox/         剪贴板、拖拽进来的图片
-    ├── designs/       设计稿解析出的规格（.md）
-    └── screenshots/   渲染截图和差异热力图
+    <数据根>/
+    ├── projects.json   工作区注册表
+    ├── workspace/      默认工作区（不选项目时用它）
+    ├── scratch/        未分组会话的工作区
+    ├── projects/       各项目的数据，按 <项目名-哈希> 分目录
+    ├── memory/         全局记忆
+    ├── inbox/          剪贴板、拖拽进来的图片
+    ├── designs/        设计稿解析出的规格（.md）
+    └── screenshots/    渲染截图和差异热力图
 
-**但日程表上有个例外**：会话记录（``.va/sessions``）留在项目里。
-它是纯文本、体积极小，而且「这个项目的对话历史」放在项目旁边更符合直觉。
+**Windows 上刻意避开系统盘**：数据（尤其是会话历史）会一直长，
+放 C: 盘迟早把系统盘撑满。能选的话优先放别的固定盘。
 
 这个目录会被自动加入可读范围——设计稿规格存在这儿，
 上下文被压缩之后 agent 得能 ``read_file`` 把它取回来。
@@ -25,7 +30,18 @@ import os
 import re
 from pathlib import Path
 
-DEFAULT_HOME = "~/.vibe-agent"
+#: 数据根的名字。放在平台默认位置下面。
+DATA_DIR_NAME = "vibe-agent"
+
+#: 老位置。没有 VA_HOME 时优先用它，免得老用户的数据「消失」。
+LEGACY_DEFAULT_HOME = "~/.vibe-agent"
+
+#: 默认工作区。不选项目时新会话就用它。
+DEFAULT_WORKSPACE_DIR = "workspace"
+#: 未分组会话的工作区。和默认工作区分开，免得「随手问的问题」混进正式工作目录。
+SCRATCH_DIR = "scratch"
+#: 工作区注册表。
+PROJECTS_INDEX = "projects.json"
 
 INBOX_DIR = "inbox"
 DESIGNS_DIR = "designs"
@@ -35,10 +51,126 @@ SCREENSHOTS_DIR = "screenshots"
 LEGACY_SESSION_DIR = ".va/sessions"
 
 
+def _is_windows() -> bool:
+    """单独抽出来是为了**可测**。
+
+    测试里直接 patch ``os.name`` 会影响全局——``pathlib.Path`` 也是按
+    ``os.name`` 决定返回 PosixPath 还是 WindowsPath 的，一 patch 整个进程的
+    Path 行为都变了。所以这里留一个窄接口。
+    """
+    return os.name == "nt"
+
+
+def _windows_non_system_drives() -> list[tuple[str, int]]:
+    """Windows：列出**非系统盘的固定盘**及剩余空间，按剩余从大到小。
+
+    排掉的不只是系统盘，还有网络盘、光驱、U 盘——那些要么慢、
+    要么随时会拔掉，不该拿来存长期数据。
+    """
+    try:
+        import ctypes
+        import shutil as _shutil
+    except ImportError:
+        return []
+
+    DRIVE_FIXED = 3
+    system = (os.environ.get("SystemDrive") or "C:").rstrip(":").upper()
+
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        mask = kernel32.GetLogicalDrives()
+    except (AttributeError, OSError):
+        return []
+
+    found: list[tuple[str, int]] = []
+    for index in range(26):
+        if not (mask >> index) & 1:
+            continue
+        letter = chr(ord("A") + index)
+        if letter == system:
+            continue
+        root = f"{letter}:\\"
+        try:
+            if kernel32.GetDriveTypeW(root) != DRIVE_FIXED:
+                continue
+            free = _shutil.disk_usage(root).free
+        except OSError:
+            continue
+        found.append((letter, free))
+
+    return sorted(found, key=lambda item: -item[1])
+
+
+def default_data_root() -> tuple[Path, str]:
+    """数据该放哪 + 一句说明（给自检和提示用）。
+
+    优先级：
+
+    1. ``VA_HOME``
+    2. **老位置 ``~/.vibe-agent`` 已经存在** → 继续用它
+       （不能因为换了默认值就让老用户的数据「不见了」）
+    3. Windows：非系统盘里剩余空间最大的那块，``<盘>:\vibe-agent``
+    4. 退回用户目录 ``~/.vibe-agent``
+
+    **第 3 步找不到时不静默降级**：调用方要把原因告诉用户，
+    否则他会以为装在 D 盘，实际还在 C 盘。
+    """
+    override = (os.environ.get("VA_HOME") or "").strip()
+    if override:
+        return Path(override).expanduser(), "VA_HOME 指定"
+
+    legacy = Path(LEGACY_DEFAULT_HOME).expanduser()
+    if legacy.is_dir():
+        return legacy, "沿用已有的 ~/.vibe-agent"
+
+    if _is_windows():
+        drives = _windows_non_system_drives()
+        if drives:
+            letter, free = drives[0]
+            gb = free / (1024 ** 3)
+            return (
+                Path(f"{letter}:\\{DATA_DIR_NAME}"),
+                f"非系统盘 {letter}:（剩余 {gb:.0f} GB）",
+            )
+        return legacy, (
+            "没找到非系统盘，只能用系统盘。想换位置就设 "
+            f"VA_HOME=D:\\{DATA_DIR_NAME}"
+        )
+
+    return legacy, "默认位置"
+
+
 def agent_home() -> Path:
-    """agent 自己的家目录。``VA_HOME`` 可以改位置。"""
-    raw = (os.environ.get("VA_HOME") or "").strip() or DEFAULT_HOME
-    return Path(raw).expanduser()
+    """agent 的数据根。``VA_HOME`` 可以改位置。"""
+    return default_data_root()[0]
+
+
+def data_root_note() -> str:
+    """数据根为什么在那儿——自检和启动提示用。"""
+    return default_data_root()[1]
+
+
+def default_workspace_dir() -> Path:
+    """默认工作区。
+
+    **不选项目时的落脚点。** 刻意放在数据根下面：数据根已经做过平台判定
+    （Windows 上避开系统盘），所以这里自动跟着走，不用再判一次。
+    """
+    return agent_home() / DEFAULT_WORKSPACE_DIR
+
+
+def scratch_dir() -> Path:
+    """未分组会话的工作区。
+
+    和默认工作区分开是有意的：「随手问一句」产生的东西不该混进
+    你真正的工作目录里。这个地方可以随时整个删掉。
+    """
+    return agent_home() / SCRATCH_DIR
+
+
+def projects_index_path() -> Path:
+    """工作区注册表。"""
+    return agent_home() / PROJECTS_INDEX
 
 
 def inbox_dir() -> Path:

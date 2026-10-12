@@ -242,9 +242,61 @@
     position: absolute; top: 2px; right: 2px; padding: 0 5px; font-size: 11px;
     background: #0009; border-color: transparent;
   }
+  /* ---- 侧栏：工作区 + 会话 ---- */
+  .shell { display: flex; height: 100vh; }
+  .content { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+  #sidebar {
+    width: 250px; flex: 0 0 250px; background: var(--panel);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  }
+  #sidebar.off { display: none; }
+  .side-head { padding: 10px; border-bottom: 1px solid var(--border); }
+  .side-head button { width: 100%; }
+  .side-title {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px 6px; font-size: 12px; color: var(--muted);
+  }
+  .side-title button {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 15px; line-height: 1; padding: 0 4px;
+  }
+  .side-title button:hover { color: var(--accent); }
+  #side-list { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+  .ws-block { margin-bottom: 4px; }
+  .ws-head {
+    display: flex; align-items: center; gap: 6px; padding: 5px 12px;
+    font-size: 12.5px; color: var(--text); cursor: pointer;
+  }
+  .ws-head:hover { background: var(--panel2); }
+  .ws-head .ws-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ws-head .ws-count { font-size: 11px; color: var(--muted); }
+  .ws-head.missing { color: var(--red); }
+  .sess {
+    display: block; padding: 5px 12px 5px 24px; font-size: 12.5px;
+    color: var(--muted); cursor: pointer; border-left: 2px solid transparent;
+  }
+  .sess:hover { background: var(--panel2); color: var(--text); }
+  .sess.active { background: var(--panel2); color: var(--text); border-left-color: var(--accent); }
+  .sess .s-title { display: flex; justify-content: space-between; gap: 6px; color: var(--text); }
+  .sess .s-title span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess .s-when { font-size: 11px; color: var(--muted); flex: 0 0 auto; }
+  .sess .s-prev { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+  .side-empty { padding: 8px 12px; font-size: 12px; color: var(--muted); }
+
 </style>
 </head>
 <body>
+<div class="shell">
+
+<aside id="sidebar">
+  <div class="side-title">
+    <span>工作区</span>
+    <span class="ws-count" id="side-total"></span>
+  </div>
+  <div id="side-list"></div>
+</aside>
+
+<div class="content">
 
 <header>
   <div class="brand">vibe<span>-agent</span></div>
@@ -281,6 +333,8 @@
     </div>
   </div>
 </footer>
+</div>
+</div>
 
 <div class="overlay" id="settings">
   <div class="sheet">
@@ -713,6 +767,56 @@ function sessionLabel() {
     ` · 会话 <code>${escapeHtml(sessionInfo.id)}</code>` +
     (sessionInfo.title ? ` · ${escapeHtml(sessionInfo.title)}` : "")
   );
+}
+
+async function loadSidebar() {
+  // 侧栏：工作区 + 会话。**只读展示**——点击切换会话是下一步的事，
+  // 这里先把「有哪些项目、各自有哪些会话」摆出来。
+  let data;
+  try {
+    data = await fetch("/api/sessions").then((r) => r.json());
+  } catch (err) {
+    return;
+  }
+
+  const list = $("side-list");
+  const blocks = data.blocks || [];
+  $("side-total").textContent = data.total ? `${data.total} 个会话` : "";
+
+  if (!blocks.length) {
+    list.innerHTML = '<div class="side-empty">还没有任何会话。</div>';
+    return;
+  }
+
+  list.innerHTML = "";
+  for (const block of blocks) {
+    const wrap = document.createElement("div");
+    wrap.className = "ws-block";
+
+    const head = document.createElement("div");
+    head.className = "ws-head" + (block.exists ? "" : " missing");
+    head.title = block.exists ? block.path : `${block.path}（找不到这个目录）`;
+    head.innerHTML =
+      `<span>${block.kind === "ungrouped" ? "○" : "▸"}</span>` +
+      `<span class="ws-name">${escapeHtml(block.name)}</span>` +
+      `<span class="ws-count">${block.sessions.length}</span>`;
+    wrap.appendChild(head);
+
+    for (const session of block.sessions) {
+      const row = document.createElement("div");
+      row.className = "sess" + (session.active ? " active" : "");
+      row.title = session.workspace || block.path;
+      row.dataset.id = session.id;
+      row.innerHTML =
+        `<div class="s-title"><span>${escapeHtml(session.title)}</span>` +
+        `<span class="s-when">${escapeHtml(session.when)}</span></div>` +
+        (session.preview && session.preview !== session.title
+          ? `<div class="s-prev">${escapeHtml(session.preview)}</div>`
+          : "");
+      wrap.appendChild(row);
+    }
+    list.appendChild(wrap);
+  }
 }
 
 async function showStorage() {
@@ -1433,7 +1537,7 @@ document.addEventListener("keydown", (e) => {
 loadModels();
 // 先把历史渲染完再连事件流：两者并发的话，banner 可能先到，
 // 头部就会漏掉会话那一段（谁先完成是不确定的）。
-loadHistory().then(showStorage).finally(() => connect());
+loadHistory().then(showStorage).then(loadSidebar).finally(() => connect());
 input.focus();
 </script>
 </body>

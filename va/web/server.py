@@ -149,7 +149,7 @@ class WebApp:
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         """校验 → 写 .env → 热应用能应用的。返回改了什么、哪些要重启。"""
         from ..config import write_env_values
-        from ..paths import data_root, describe
+        from ..paths import data_root, describe, scratch_dir
 
         values: dict[str, str] = {}
         changed: list[str] = []
@@ -481,6 +481,131 @@ class WebApp:
                 )
         return out
 
+    def workspaces(self) -> dict[str, Any]:
+        """工作区注册表 + 每个工作区的会话数。
+
+        会话数是现算的（扫目录），不是存的——存了就会和实际对不上。
+        """
+        from ..projects import Registry, index_sessions
+
+        registry = Registry.load()
+        counts: dict[str, int] = {}
+        for entry in index_sessions():
+            counts[entry.slug] = counts.get(entry.slug, 0) + 1
+
+        rows = []
+        for item in registry.all():
+            rows.append(
+                {
+                    "path": item.path,
+                    "slug": item.slug,
+                    "name": item.name,
+                    "sessions": counts.get(item.slug, 0),
+                    "exists": item.exists,
+                    "pinned": item.pinned,
+                    "last_opened": item.last_opened,
+                }
+            )
+        return {
+            "workspaces": rows,
+            "default": registry.effective_default(),
+            "current": str(self.workspace.root),
+        }
+
+    def sessions_index(self) -> dict[str, Any]:
+        """侧栏用的跨工作区会话索引。"""
+        from ..paths import scratch_dir
+        from ..projects import GROUP_DEFAULT, GROUP_UNGROUPED, GROUP_WORKSPACE
+        from ..projects import group_sessions, index_sessions, relative_time
+
+        entries = index_sessions()
+        grouped = group_sessions(entries)
+
+        def shape(items):
+            return [
+                {
+                    "id": e.id,
+                    "workspace": e.workspace,
+                    "slug": e.slug,
+                    "name": Path(e.workspace).name if e.workspace else "",
+                    "title": e.title or e.preview or e.id,
+                    "preview": e.preview,
+                    "when": relative_time(e.updated_at),
+                    "updated_at": e.updated_at,
+                    "messages": e.message_count,
+                    "active": e.id == self.active_session_id(),
+                }
+                for e in items
+            ]
+
+        from ..projects import Registry
+
+        registry = Registry.load()
+        known = {item.slug: item for item in registry.all()}
+
+        # 按工作区分组：每个已知工作区一块，各自挂上它的会话
+        blocks = []
+        for entry in registry.all():
+            items = [e for e in grouped.get(GROUP_WORKSPACE, []) if e.slug == entry.slug]
+            blocks.append(
+                {
+                    "kind": GROUP_WORKSPACE,
+                    "slug": entry.slug,
+                    "name": entry.name,
+                    "path": entry.path,
+                    "exists": entry.exists,
+                    "sessions": shape(items),
+                }
+            )
+
+        # 注册表里没有、但有会话的工作区（比如换了机器）也要显示出来，
+        # 否则那些会话就「消失」了
+        seen = set(known)
+        extra: dict[str, list] = {}
+        for item in grouped.get(GROUP_WORKSPACE, []):
+            if item.slug not in seen:
+                extra.setdefault(item.slug, []).append(item)
+        for slug, items in extra.items():
+            blocks.append(
+                {
+                    "kind": GROUP_WORKSPACE,
+                    "slug": slug,
+                    "name": Path(items[0].workspace).name or slug,
+                    "path": items[0].workspace,
+                    "exists": True,
+                    "sessions": shape(items),
+                }
+            )
+
+        if grouped.get(GROUP_DEFAULT):
+            blocks.append(
+                {
+                    "kind": GROUP_DEFAULT,
+                    "slug": "default",
+                    "name": "默认工作区",
+                    "path": registry.effective_default(),
+                    "exists": True,
+                    "sessions": shape(grouped[GROUP_DEFAULT]),
+                }
+            )
+        if grouped.get(GROUP_UNGROUPED):
+            blocks.append(
+                {
+                    "kind": GROUP_UNGROUPED,
+                    "slug": "ungrouped",
+                    "name": "未分组",
+                    "path": str(scratch_dir()),
+                    "exists": True,
+                    "sessions": shape(grouped[GROUP_UNGROUPED]),
+                }
+            )
+
+        return {"blocks": blocks, "total": len(entries)}
+
+    def active_session_id(self) -> str:
+        store = getattr(self.agent, "session", None)
+        return store.meta.id if store is not None else ""
+
     def storage_report(self) -> list[dict[str, str]]:
         """存储自检：会话写哪、记忆写哪、会不会自动推。
 
@@ -792,6 +917,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self._asset("index.html")
             return
+        if parsed.path == "/api/workspaces":
+            self._json(self.app.workspaces())
+            return
+
+        if parsed.path == "/api/sessions":
+            self._json(self.app.sessions_index())
+            return
+
         if parsed.path == "/api/storage":
             self._json({"rows": self.app.storage_report()})
             return
