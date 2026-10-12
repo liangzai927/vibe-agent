@@ -308,6 +308,17 @@
   .ws-head:hover .ws-add { display: inline-block; }
   .ws-head .ws-add:hover { color: var(--accent); }
 
+  /* ---- @ 文件补全 ---- */
+  .refs {
+    position: fixed; z-index: 40; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 8px;
+    max-height: 230px; overflow-y: auto; box-shadow: 0 8px 24px #0008;
+    font-family: var(--mono); font-size: 12.5px;
+  }
+  .refs.off { display: none; }
+  .refs div { padding: 5px 11px; cursor: pointer; white-space: nowrap; }
+  .refs div:hover, .refs div.on { background: var(--accent); color: #fff; }
+
 </style>
 </head>
 <body>
@@ -537,6 +548,7 @@ projects/&lt;项目名-哈希&gt;/sessions/      这个项目的对话记录</pr
 </div>
 
 <div id="drop">松手即可上传图片</div>
+<div id="refs" class="refs off"></div>
 
 <script>
 "use strict";
@@ -828,6 +840,94 @@ function sessionLabel() {
 const PAGE_SIZE = 8;
 const collapsed = new Set();   // 折叠起来的工作区 slug
 const shown = new Map();       // 每个工作区当前显示多少条
+
+// ---------------------------------------------------------------- @ 文件补全
+
+let refItems = [];
+let refIndex = 0;
+let refQuery = "";      // 触发补全时 @ 后面的那串
+let refStart = -1;      // @ 在输入框里的位置
+
+function refsVisible() {
+  return !$("refs").classList.contains("off");
+}
+
+function hideRefs() {
+  $("refs").classList.add("off");
+  refItems = [];
+  refIndex = 0;
+}
+
+function positionRefs() {
+  // 贴在输入框上方——下面是发送区，往下弹会被挡住
+  const box = $("input").getBoundingClientRect();
+  const el = $("refs");
+  el.style.left = box.left + "px";
+  el.style.width = Math.min(Math.max(box.width * 0.6, 320), box.width) + "px";
+  el.style.bottom = window.innerHeight - box.top + 6 + "px";
+}
+
+function renderRefs() {
+  if (!refItems.length) {
+    hideRefs();
+    return;
+  }
+  const el = $("refs");
+  el.innerHTML = refItems
+    .map((name, i) => `<div class="${i === refIndex ? "on" : ""}" data-i="${i}">${escapeHtml(name)}</div>`)
+    .join("");
+  el.classList.remove("off");
+  positionRefs();
+  el.querySelectorAll("div").forEach((row) => {
+    row.addEventListener("mousedown", (ev) => {
+      ev.preventDefault();   // 别让输入框失焦
+      insertRef(Number(row.dataset.i));
+    });
+  });
+}
+
+function insertRef(index) {
+  const name = refItems[index];
+  if (name === undefined || refStart < 0) return;
+  const input = $("input");
+  const before = input.value.slice(0, refStart);
+  const after = input.value.slice(input.selectionStart);
+  input.value = `${before}@${name} ${after}`;
+  const caret = before.length + name.length + 2;
+  input.setSelectionRange(caret, caret);
+  input.focus();
+  hideRefs();
+}
+
+async function updateRefs() {
+  // 从光标往回找最近的 @：它到光标之间不能有空格，否则不算在补全
+  const input = $("input");
+  const caret = input.selectionStart;
+  const upto = input.value.slice(0, caret);
+  const at = upto.lastIndexOf("@");
+  if (at < 0 || /\s/.test(upto.slice(at + 1))) {
+    hideRefs();
+    return;
+  }
+  const query = upto.slice(at + 1);
+  refStart = at;
+  if (query === refQuery && refsVisible()) return;   // 同一个查询别反复打
+  refQuery = query;
+
+  let files = [];
+  try {
+    files = (await fetch(`/api/files?q=${encodeURIComponent(query)}`).then((r) => r.json())).files || [];
+  } catch (err) {
+    return;
+  }
+  refItems = files;
+  refIndex = 0;
+  renderRefs();
+}
+
+$("input").addEventListener("input", updateRefs);
+$("input").addEventListener("click", updateRefs);
+$("input").addEventListener("blur", () => setTimeout(hideRefs, 120));
 
 async function loadSidebar() {
   let data;
@@ -1781,8 +1881,24 @@ $("set-session-dir").addEventListener("input", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && $("settings").classList.contains("on")) closeSettings();
-});
+  if (e.key === "Escape") {
+    if ($("settings").classList.contains("on")) closeSettings();
+    else if (refsVisible()) hideRefs();
+  }
+
+  // 补全开着的时候，方向键和 Enter 归它
+  if (refsVisible()) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      refIndex = (refIndex + (e.key === "ArrowDown" ? 1 : -1) + refItems.length) % refItems.length;
+      renderRefs();
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      e.stopPropagation();
+      insertRef(refIndex);
+    }
+  }
+}, true);
 
 // ---------------------------------------------------------------- 启动
 loadModels();

@@ -397,7 +397,7 @@ def _repl(agent: Agent, ui: UI) -> None:
                 break
             continue
 
-        task = _expand_clip_tokens(raw, agent, ui)
+        task = _expand_refs(raw, agent, ui)
         if task is None:
             continue
 
@@ -790,6 +790,32 @@ def _paste_clipboard(agent: Agent, ui: UI, name: str = "") -> None:
     ui.success(f"已存为 {rel}{dims}")
     ui.info("用法：在消息里直接写 @clip，它会自动替换成这个路径。例如：")
     ui.info(f"  › 用 inspect_image 看一下 {rel}，然后照着它实现")
+
+
+def _expand_refs(text: str, agent: Agent, ui: UI) -> str | None:
+    """把 `@clip`（剪贴板）和 `@路径`（文件引用）都展开。
+
+    顺序有讲究：先剪贴板——`@clip` 是个特殊 token，会被 `@clip` 那条
+    正则整体替换成一个路径；如果反过来，文件引用那条正则会先把它当成
+    「一个叫 clip 的文件」去解析，然后报「找不到 clip」。
+    """
+    from .refs import expand as expand_file_refs
+
+    after_clip = _expand_clip_tokens(text, agent, ui)
+    if after_clip is None:
+        return None
+    if after_clip != text:
+        # 剪贴板展开会插入文件路径，别再往里找引用了
+        return after_clip
+
+    expanded, refs = expand_file_refs(text, agent.workspace.root)
+    for ref in refs:
+        if ref.ok:
+            note = f"（{ref.note}）" if ref.note and not ref.inlined else ""
+            ui.info(f"已引用 {ref.path or ref.given}{note}")
+        else:
+            ui.warn(ref.note)
+    return expanded
 
 
 def _expand_clip_tokens(text: str, agent: Agent, ui: UI) -> str | None:

@@ -33,6 +33,7 @@ from ..paths import project_slug
 from ..session import SessionStore
 from ..config import Config, replace
 from ..loop import Agent
+from ..refs import expand as expand_refs
 from ..util import strip_ansi
 from ..workspace import Workspace
 from .bridge import ApprovalGate, EventBus, WebUI
@@ -77,6 +78,32 @@ class SessionRuntime:
     @property
     def busy(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
+
+
+def _fuzzy_score(query: str, text: str) -> int:
+    """子序列匹配的打分。0 表示不匹配。
+
+    连续命中给高分、词边界给加分——这样打 `auth` 时
+    `src/auth.ts` 排在 `src/authoring.md` 前面。
+    """
+    if not query:
+        return 1
+    if query in text:
+        return 1000 - text.index(query)   # 越靠前越好
+
+    score = 0
+    position = 0
+    streak = 0
+    for char in query:
+        found = text.find(char, position)
+        if found < 0:
+            return 0
+        streak = streak + 1 if found == position else 0
+        score += 10 + streak * 5
+        if found == 0 or text[found - 1] in "/-_. ":
+            score += 15          # 词边界
+        position = found + 1
+    return score
 
 
 def _all_sessions():
@@ -629,17 +656,29 @@ class WebApp:
         if runtime is None:
             return False, "没有打开的会话"
 
+        # `@路径` 引用：在**提交时**展开，把文件内容并进消息。
+        # 这样 agent 少两轮往返（先 glob 找、再 read_file 读），又快又省。
+        expanded, refs = expand_refs(text, runtime.workspace.root)
+        for ref in refs:
+            if ref.ok:
+                runtime.ui._emit(
+                    "note", level="info",
+                    text=f"已引用 {ref.path or ref.given}" + (f"（{ref.note}）" if ref.note and not ref.inlined else ""),
+                )
+            else:
+                runtime.ui._emit("note", level="warn", text=ref.note)
+        # 界面上显示用户原话，不显示展开后那一大坨
         runtime.ui._emit("user", text=text)
         runtime.worker = threading.Thread(
             target=self._run,
-            args=(runtime, text),
+            args=(runtime, expanded, text),
             name=f"va-task-{runtime.id[:12]}",
             daemon=True,
         )
         runtime.worker.start()
         return True, "已开始"
 
-    def _run(self, runtime: SessionRuntime, text: str) -> None:
+    def _run(self, runtime: SessionRuntime, text: str, display: str = "") -> None:
         """跑一个会话的任务。
 
         **运行时是参数传进来的**，不读 ``self.active()``——用户可能在任务
@@ -648,7 +687,7 @@ class WebApp:
         """
         with runtime.lock:
             try:
-                answer = runtime.agent.run(text)
+                answer = runtime.agent.run(text, display=display or text)
             except Exception as exc:  # noqa: BLE001 - 任何异常都要让界面知道
                 runtime.ui._emit(
                     "note", level="error", text=f"{type(exc).__name__}: {exc}"
@@ -831,6 +870,43 @@ class WebApp:
         return store.meta.id if store is not None else ""
 
     # ------------------------------------------------------------- 工作区与会话管理
+
+    def find_files(self, query: str, *, limit: int = 20) -> dict[str, Any]:
+        """给 `@` 自动补全用的文件列表。
+
+        模糊匹配而不是前缀匹配——你多半记得「auth」不记得它在哪个目录下。
+        匹配的是**相对路径**，所以打 `src/auth` 和打 `auth` 都能找到。
+        """
+        from ..refs import INLINE_SKIP_DIRS
+
+        query = (query or "").strip().lstrip("@").lower()
+        root = Path(self.workspace.root)
+        found: list[tuple[int, str]] = []
+
+        try:
+            for path in root.rglob("*"):
+                if len(found) > limit * 40:
+                    break
+                try:
+                    rel = path.relative_to(root)
+                except ValueError:
+                    continue
+                parts = rel.parts
+                if any(part in INLINE_SKIP_DIRS for part in parts):
+                    continue
+                if any(part.startswith(".") and part not in (".github",) for part in parts[:-1]):
+                    continue
+                if not path.is_file():
+                    continue
+                text = str(rel)
+                score = _fuzzy_score(query, text.lower()) if query else 1
+                if score > 0:
+                    found.append((score, text))
+        except OSError:
+            pass
+
+        found.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+        return {"files": [name for _, name in found[:limit]]}
 
     def add_workspace(self, path: str) -> dict[str, Any]:
         """把一个文件夹加进注册表。
@@ -1295,6 +1371,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/storage":
             self._json({"rows": self.app.storage_report()})
+            return
+
+        if parsed.path == "/api/files":
+            params = parse_qs(parsed.query)
+            query = (params.get("q") or [""])[0]
+            self._json(self.app.find_files(query))
             return
 
         if parsed.path == "/api/history":

@@ -130,12 +130,18 @@ class Agent:
         self.undo = UndoStack(self.workspace.root)
         self.plan_board.clear()
 
-    def run(self, task: str) -> str:
-        """执行一个任务，返回模型的最终文本回答。"""
+    def run(self, task: str, *, display: str | None = None) -> str:
+        """执行一个任务，返回模型的最终文本回答。
+
+        ``display`` 是给用户看的原文。`@路径` 引用会把文件内容并进
+        ``task``，但界面上该显示用户原话——展开后那一大坨不是他写的。
+        """
         self._maybe_compact(force=False)
         self._append(user_message(task))
+        # 会话文件里存**展开后**的版本：那是 agent 实际看到的东西，
+        # 恢复会话时不能少。界面上另用 display 显示原文。
         if self.session is not None and not self.session.meta.title:
-            self.session.set_title(preview(task, 60))
+            self.session.set_title(preview(display or task, 60))
 
         final_text = ""
         reason = "max_steps"
