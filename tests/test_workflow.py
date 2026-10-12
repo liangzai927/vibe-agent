@@ -294,3 +294,49 @@ class TestDescribe(WorkflowTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestDefaultsDoNotEnforce(WorkflowTestCase):
+    """**默认值的准则是「不配就不干预」。**
+
+    踩过的坑：`commit.pattern` 和 `require_ticket` 原本有非空默认值，
+    而 `load()` 在**没有任何配置文件**时也会带上默认值——等于
+    「没配规则的项目也被凭空要求 commit 格式」。这跟「没配规则就不校验」
+    直接矛盾，而且会让所有老项目突然提交不了。
+
+    修法：把「生效的默认值」和「模板里展示的推荐值」分开。
+    """
+
+    def test_no_config_means_no_commit_enforcement(self):
+        wf = load(self.root)
+        self.assertEqual(wf.get("commit.pattern"), "")
+        self.assertFalse(wf.get("commit.require_ticket"))
+        self.assertEqual(wf.get("commit.forbid_words"), [])
+
+    def test_require_clean_is_a_safety_default_not_a_convention(self):
+        """**这条是刻意保留的例外。**
+
+         不是「团队约定」而是「安全默认」——
+        带着未提交的改动切分支会丢东西。保守的默认是好的：
+        它拒绝做一件有风险的事，而不是替你做决定。
+        """
+        self.assertTrue(load(self.root).get("branch.require_clean"))
+
+    def test_the_template_still_recommends(self):
+        """推荐和强制是两件事——模板要展示推荐值，但不能因此强制。"""
+        text = template()
+        self.assertIn("require_ticket: true", text, "模板里该展示推荐值")
+        self.assertIn("feat|fix", text)
+
+    def test_the_template_still_does_not_enforce(self):
+        self.write_project(template())
+        wf = load(self.root)
+        self.assertFalse(wf.get("commit.require_ticket"), "模板里的推荐值生效了")
+
+    def test_a_configured_project_is_enforced(self):
+        self.write_project(
+            'commit:\n  pattern: "^(feat|fix): .{4,72}$"\n  require_ticket: true\n'
+        )
+        wf = load(self.root)
+        self.assertTrue(wf.get("commit.require_ticket"))
+        self.assertIn("feat|fix", wf.get("commit.pattern"))

@@ -183,25 +183,73 @@ class GitLog(_GitTool):
 class GitCreateBranch(_GitTool):
     name = "git_create_branch"
     description = (
-        "创建并切换到新分支。base 为空则从当前 HEAD 切出；"
-        "若目标分支已存在则直接切换过去。"
+        "创建并切换到新分支。\n"
+        "**推荐用 ticket + title 让工具按团队约定生成分支名**"
+        "（规则来自 workflow.yaml 的 branch 段）——那样不会写错格式。\n"
+        "直接给 name 也行，但会被按约定校验，不合规会被拒并给出合规示例。"
     )
     parameters = {
         "type": "object",
         "properties": {
-            "name": {"type": "string", "description": "新分支名，例如 feat/login-page"},
+            "name": {
+                "type": "string",
+                "description": "分支名。给了 ticket+title 时可以省略，会自动生成",
+            },
+            "ticket": {
+                "type": "string",
+                "description": "需求号，例如 ORD-312。给了就按模板生成分支名",
+            },
+            "title": {"type": "string", "description": "需求标题，用于生成 slug"},
             "base": {"type": "string", "description": "起点分支或 commit（可选）"},
         },
-        "required": ["name"],
+        "required": [],
     }
     requires_approval = True
     opaque = True  # 切换分支会整体替换工作树内容，无法用文件快照还原
 
-    def run(self, name: str, base: str | None = None, **_: Any) -> str:
+    def run(
+        self,
+        name: str = "",
+        ticket: str = "",
+        title: str = "",
+        base: str | None = None,
+        **_: Any,
+    ) -> str:
         self._ensure_repo()
+
+        from .. import conventions
+
+        workflow = getattr(self.ctx, "workflow", None)
+
+        # 给了需求号就按模板生成——比让人手拼可靠得多
         branch = name.strip()
+        if not branch and ticket.strip():
+            branch = conventions.build_branch_name(
+                workflow, ticket=ticket.strip(), title=title.strip()
+            )
         if not branch:
-            raise ToolError("分支名不能为空")
+            raise ToolError(
+                "要么给 name，要么给 ticket + title（后者会按团队约定生成）。"
+            )
+
+        problem = conventions.check_branch_name(branch, workflow)
+        if problem:
+            raise ToolError(problem)
+
+        # 约定要求工作区干净才切
+        if conventions.branch_requires_clean(workflow):
+            dirty = self._git("status", "--porcelain").strip()
+            if dirty:
+                count = len(dirty.splitlines())
+                raise ToolError(
+                    f"团队约定切换分支前工作区要干净（branch.require_clean = true），"
+                    f"现在有 {count} 个改动没提交。\n"
+                    f"先提交或还原，再切分支——带着未提交的改动切分支很容易丢东西。"
+                )
+
+        if base is None:
+            configured = conventions.branch_base(workflow)
+            base = configured or None
 
         existing = self._git("branch", "--list", branch)
         if existing.strip():
@@ -241,13 +289,26 @@ class GitCommit(_GitTool):
     parameters = {
         "type": "object",
         "properties": {
-            "message": {"type": "string", "description": "提交信息"},
+            "message": {
+                "type": "string",
+                "description": (
+                    "提交信息。给了 kind+subject 时可以省略，会按团队模板生成。"
+                    "**会按约定校验格式**，不合规会被拒"
+                ),
+            },
             "add_all": {"type": "boolean", "description": "提交前暂存全部改动（默认 true）"},
             "files": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "只提交这些路径（可选，设置后忽略 add_all）",
             },
+            "ticket": {"type": "string", "description": "需求号，会按模板拼进 message"},
+            "kind": {
+                "type": "string",
+                "description": "feat / fix / refactor / test / docs / chore / perf",
+            },
+            "scope": {"type": "string", "description": "影响范围，例如 order"},
+            "subject": {"type": "string", "description": "一句话说做了什么"},
             "override_gate": {
                 "type": "string",
                 "description": (
@@ -256,7 +317,7 @@ class GitCommit(_GitTool):
                 ),
             },
         },
-        "required": ["message"],
+        "required": [],
     }
     requires_approval = True
 
@@ -300,17 +361,42 @@ class GitCommit(_GitTool):
 
     def run(
         self,
-        message: str,
+        message: str = "",
         add_all: bool = True,
         files: list[str] | None = None,
+        ticket: str = "",
+        kind: str = "",
+        scope: str = "",
+        subject: str = "",
         override_gate: str = "",
         **_: Any,
     ) -> str:
         note = self._check_gate(override_gate)
         self._ensure_repo()
+
+        from .. import conventions
+
+        workflow = getattr(self.ctx, "workflow", None)
+
         text = message.strip()
+        if not text and subject.strip():
+            text = conventions.build_commit_message(
+                workflow,
+                kind=kind.strip() or "feat",
+                scope=scope.strip(),
+                subject=subject.strip(),
+                ticket=ticket.strip(),
+            )
         if not text:
-            raise ToolError("提交信息不能为空")
+            raise ToolError(
+                "要么给 message，要么给 kind + subject"
+                "（后者会按团队模板生成，不会写错格式）。"
+            )
+
+        problem = conventions.check_commit_message(text, workflow)
+        if problem:
+            raise ToolError(problem)
+
         if note:
             # 豁免要**留在 commit 里**，不只是在会话记录里——
             # 事后查 git log 的人也该看得见

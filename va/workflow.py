@@ -44,11 +44,17 @@ SUPPORTED_VERSIONS = (1,)
 
 @dataclass
 class Field:
+    #: **生效的默认值**。它的准则是「不配就不干预」——
+    #: 一个没有 workflow.yaml 的项目不该被凭空要求 commit 格式。
     default: Any
     kind: type
     doc: str
     #: 额外的校验，返回 None 表示通过，否则返回错误说明
     check: Callable[[Any], str | None] | None = None
+    #: 模板里展示的**推荐值**（不填就用 default）。
+    #: 和 default 分开是因为「推荐你这样配」和「不配就强制」是两件事——
+    #: 混在一起会导致没配过的项目也被强制。
+    example: Any = None
 
 
 def _regex_check(pattern: str) -> str | None:
@@ -92,21 +98,26 @@ SCHEMA: dict[str, dict[str, Field]] = {
     },
     "commit": {
         "pattern": Field(
-            r"^(feat|fix|refactor|test|docs|chore|perf)(\([a-z0-9-]+\))?: .{4,72}$",
+            "",
             str,
-            "commit message 的正则",
+            "commit message 的正则。**留空表示不校验格式**，"
+            r"推荐：^(feat|fix|refactor|test|docs|chore|perf)(\([a-z0-9-]+\))?: .{4,72}$",
             _regex_check,
+            example=r"^(feat|fix|refactor|test|docs|chore|perf)(\([a-z0-9-]+\))?: .{4,72}$",
         ),
         "template": Field(
             "{type}({scope}): {subject} (#{ticket})",
             str,
             "生成 message 用的模板",
         ),
-        "require_ticket": Field(True, bool, "message 里必须带需求号"),
+        "require_ticket": Field(
+            False, bool, "message 里必须带需求号（默认不强制）", example=True
+        ),
         "forbid_words": Field(
-            ["WIP", "fix bug", "update", "修改"],
+            [],
             list,
-            "message 里不许出现的词",
+            "message 里不许出现的词（默认不限制）",
+            example=["WIP", "fix bug", "update"],
         ),
         "allow_no_verify": Field(
             False, bool, "是否允许 --no-verify 绕过 pre-commit hook（默认禁止）"
@@ -647,7 +658,8 @@ def template() -> str:
             choice = CHOICES.get(f"{section}.{name}")
             if choice:
                 lines.append(f"  # 可选：{' / '.join(choice)}")
-            for line in _yaml_lines(name, spec.default, indent=2):
+            shown = spec.default if spec.example is None else spec.example
+            for line in _yaml_lines(name, shown, indent=2):
                 lines.append(f"  # {line.strip()}")
             lines.append("  #")
         # 段落里全是注释时，YAML 会解析成 null。load 会把 null 段落当「没配」丢掉

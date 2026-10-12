@@ -292,6 +292,38 @@ branch:
 还会做跨字段检查，比如「门禁开着却没配任何测试」「要求带需求号但模板里
 没有 {ticket}」「配了就绪端口却没配启动命令」。
 
+### 约定校验（分支名 / commit 格式）
+
+规则来自 `workflow.yaml`，**校验在工具层**（和门禁同一个道理——
+提示词里写「请遵守命名规范」是祈祷，工具直接拒绝才是约束）。
+
+```
+git_create_branch(ticket="ORD-312", title="订单列表按状态筛选")
+  → feature/ORD-312-订单列表按状态筛选     ← 按模板生成，不会写错
+
+git_create_branch(name="my-branch")
+  ✗ 分支名 'my-branch' 不符合团队约定（模板 'feature/{ticket}-{slug}'）。
+    照这个改：feature/ORD-312-示例标题
+
+git_commit(kind="feat", scope="order", subject="列表支持筛选", ticket="ORD-312")
+  → feat(order): 列表支持筛选 (#ORD-312)
+```
+
+**拒绝时必须给可用的例子**——只说「不合规」会让人（和模型）反复试错。
+
+**「生效的默认值」和「模板里的推荐值」是两件事**：
+
+- `commit.pattern` 默认是**空**（不校验格式），模板里却展示推荐的写法
+- `commit.require_ticket` 默认 **false**，模板里展示 `true`
+
+混在一起会导致**没配过 workflow.yaml 的项目也被凭空要求 commit 格式**——
+和「没配规则就不校验」直接矛盾。`Field.example` 就是为这个加的。
+
+唯一的例外是 `branch.require_clean`（默认 true）：它是**安全默认**而不是
+约定——带着未提交的改动切分支会丢东西，保守的默认是好的。
+
+**不让绕过 pre-commit hook**：代码里没有 `--no-verify`，宁可失败。
+
 ### 任务与监控
 
 「这个任务走到哪了」是独立于对话的——存在项目里 `.vibe/tasks/`，
