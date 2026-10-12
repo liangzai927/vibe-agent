@@ -316,6 +316,7 @@ vibe-agent/
 │   └── web/                浏览器界面（服务端 + 单文件前端）
 ├── tests/                  900+ 测试
 └── docs/DESIGN.md          设计笔记（为什么这么做）
+└── docs/PRODUCTION-WORKFLOW.md  生产工作流开发计划
 ```
 
 **运行时的数据**（不在仓库里）：
