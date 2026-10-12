@@ -967,6 +967,88 @@ class WebApp:
         cap = limit or 20
         return {"files": [{"path": p, "dir": d} for _, p, d in scored[:cap]]}
 
+    def task_report(self) -> dict[str, Any]:
+        """任务看板的数据。
+
+        **「哪一步最常被干预」是这里最有价值的一列**——它就是流程定义
+        最该改的地方。所以每条任务都带上按状态聚合的干预数。
+        """
+        from ..task import STATE_LABELS, STATES, TaskStore
+
+        runtime = self.runtimes.get(self.active_id)
+        workspace = getattr(runtime, "workspace", None) or self.workspace
+        store = TaskStore(workspace.root if hasattr(workspace, "root") else workspace)
+
+        rows = []
+        for task in store.all():
+            stats = task.stats()
+            # 按「推进到哪个状态」统计干预，找出瓶颈
+            by_target: dict[str, dict[str, int]] = {}
+            for transition in task.transitions:
+                if transition.trigger != "human":
+                    continue
+                bucket = by_target.setdefault(transition.to, {"total": 0, "touched": 0})
+                bucket["total"] += 1
+                if not transition.untouched:
+                    bucket["touched"] += 1
+
+            rows.append(
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "state": task.state,
+                    "state_label": task.label,
+                    "blocked": task.blocked,
+                    "finished": task.finished,
+                    "resume_to": task.resume_to,
+                    "branch": task.branch,
+                    "progress": task.progress(),
+                    "next": task.next_state(),
+                    "next_label": STATE_LABELS.get(task.next_state(), ""),
+                    "updated_at": task.updated_at,
+                    "blockers": [
+                        {
+                            "what": b.what,
+                            "check": b.check,
+                            "kind": b.kind,
+                            "last_result": b.last_result,
+                        }
+                        for b in task.blockers
+                    ],
+                    "stats": stats,
+                    "by_target": by_target,
+                    "timeline": [
+                        {
+                            "from": t.frm,
+                            "from_label": STATE_LABELS.get(t.frm, t.frm),
+                            "to": t.to,
+                            "to_label": STATE_LABELS.get(t.to, t.to),
+                            "at": t.at,
+                            "trigger": t.trigger,
+                            "intervention": t.intervention,
+                            "note": t.note,
+                            "seconds": t.seconds,
+                        }
+                        for t in task.transitions[-20:]
+                    ],
+                }
+            )
+
+        # 瓶颈：跨任务汇总，哪个状态最常被干预
+        bottleneck: dict[str, dict[str, int]] = {}
+        for row in rows:
+            for state, counts in row["by_target"].items():
+                bucket = bottleneck.setdefault(state, {"total": 0, "touched": 0})
+                bucket["total"] += counts["total"]
+                bucket["touched"] += counts["touched"]
+
+        return {
+            "tasks": rows,
+            "states": list(STATES),
+            "labels": STATE_LABELS,
+            "bottleneck": bottleneck,
+        }
+
     def mcp_report(self) -> dict[str, Any]:
         """MCP 服务器状态。
 
@@ -1494,6 +1576,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/sessions":
             self._json(self.app.sessions_index())
+            return
+
+        if parsed.path == "/api/tasks":
+            self._json(self.app.task_report())
             return
 
         if parsed.path == "/api/mcp":

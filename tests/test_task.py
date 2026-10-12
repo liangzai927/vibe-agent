@@ -258,3 +258,57 @@ class TestTools(AgentTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestWebBoard(AgentTestCase):
+    """任务看板的数据（界面里「怎么监控」）。
+
+    **「哪一步最常被干预」是最有价值的一列**——它就是流程定义最该改的地方。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from va.loop import Agent
+        from va.task import Task
+        from va.ui import UI
+        from va.web.server import WebApp
+
+        self.agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        self.app = WebApp(self.cfg, self.workspace)
+
+        store = TaskStore(self.root)
+        task = Task(id="ORD-9", title="测试任务", state="implement")
+        task.record("branch")
+        task.record("plan", intervention="edited")
+        store.save(task)
+
+    def test_reports_the_task(self):
+        rows = self.app.task_report()["tasks"]
+        self.assertEqual(rows[0]["id"], "ORD-9")
+        self.assertEqual(rows[0]["state_label"], "实现")
+        self.assertIn("▶实现", rows[0]["progress"])
+
+    def test_carries_the_intervention_stats(self):
+        """界面要显示无干预率——那是「能不能开自动」的依据。"""
+        stats = self.app.task_report()["tasks"][0]["stats"]
+        self.assertEqual(stats["transitions"], 2)
+        self.assertEqual(stats["untouched"], 1)
+        self.assertAlmostEqual(stats["rate"], 0.5)
+
+    def test_aggregates_the_bottleneck(self):
+        """跨任务汇总哪个状态最常被干预。"""
+        bottleneck = self.app.task_report()["bottleneck"]
+        self.assertEqual(bottleneck["plan"]["total"], 1)
+        self.assertEqual(bottleneck["plan"]["touched"], 1)
+        self.assertEqual(bottleneck["branch"]["touched"], 0)
+
+    def test_labels_are_included(self):
+        labels = self.app.task_report()["labels"]
+        self.assertEqual(labels["intake"], "读需求")
+
+    def test_empty_workspace_is_not_an_error(self):
+        from va.web.server import WebApp
+
+        empty = WebApp(self.cfg, self.workspace)
+        (self.root / ".vibe" / "tasks" / "ORD-9.json").unlink()
+        self.assertEqual(empty.task_report()["tasks"], [])

@@ -370,6 +370,59 @@
   .refs div .ri { color: var(--muted); font-size: 10px; width: 10px; }
   .refs div.is-dir .ri { color: #ffb347; }
 
+  /* ---- 任务看板 ---- */
+  .badge {
+    display: inline-block; margin-left: 5px; min-width: 15px; padding: 0 4px;
+    border-radius: 8px; background: var(--accent); color: #fff;
+    font-size: 10.5px; line-height: 15px; text-align: center;
+  }
+  .badge.off { display: none; }
+  #task-panel {
+    position: fixed; inset: 0; background: #0009; z-index: 60;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 40px 20px; overflow-y: auto;
+  }
+  #task-panel.off { display: none; }
+  #task-panel .sheet {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    width: min(940px, 100%); padding: 18px 20px 22px;
+  }
+  #task-panel h2 { margin: 0 0 4px; font-size: 16px; }
+  .task-card {
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel2); padding: 11px 13px; margin-top: 11px;
+  }
+  .task-card .tc-head { display: flex; align-items: baseline; gap: 8px; }
+  .task-card .tc-id { font-family: var(--mono); color: var(--accent); font-size: 13px; }
+  .task-card .tc-title { color: var(--text); font-size: 13.5px; }
+  .task-card .tc-state {
+    margin-left: auto; font-size: 12px; padding: 1px 8px; border-radius: 10px;
+    background: #1f3a5f; color: #a9d0ff;
+  }
+  .task-card .tc-state.blocked { background: #3a2f1f; color: #ffd479; }
+  .task-card .tc-state.done { background: #1f3a24; color: #7ee787; }
+  .task-card .tc-progress {
+    margin-top: 8px; font-family: var(--mono); font-size: 11.5px;
+    color: var(--muted); word-break: break-all; line-height: 1.7;
+  }
+  .task-card .tc-progress .done { color: #7ee787; }
+  .task-card .tc-progress .now { color: var(--accent); font-weight: 600; }
+  .task-card .tc-meta { margin-top: 7px; font-size: 11.5px; color: var(--muted); }
+  .task-card .tc-block {
+    margin-top: 7px; font-size: 12px; color: #ffd479;
+    background: #ffd47912; border-left: 2px solid #ffd47966;
+    padding: 5px 9px; border-radius: 3px;
+  }
+  .task-card .tc-timeline {
+    margin-top: 9px; font-family: var(--mono); font-size: 11px;
+    color: var(--muted); line-height: 1.8; max-height: 180px; overflow-y: auto;
+  }
+  .task-card .tc-timeline .iv { color: #ff9e64; }
+  .bottleneck {
+    margin-top: 14px; padding: 10px 12px; border-radius: 7px;
+    background: #ff9e6410; border: 1px solid #ff9e6440; font-size: 12.5px;
+  }
+  .task-empty { color: var(--muted); font-size: 13px; margin-top: 12px; line-height: 1.8; }
 </style>
 </head>
 <body>
@@ -399,7 +452,8 @@
     <select id="model"></select>
   </label>
   <div class="pill" id="status">连接中…</div>
-  <button id="btn-settings" title="设置">⚙ 设置</button>
+  <button id="btn-tasks" title="任务看板">▤ 任务<span id="task-badge" class="badge off"></span></button>
+<button id="btn-settings" title="设置">⚙ 设置</button>
   <button id="btn-help" title="显示命令">/help</button>
 </header>
 
@@ -615,6 +669,17 @@ projects/&lt;项目名-哈希&gt;/sessions/      这个项目的对话记录</pr
 <div id="drop">松手即可上传图片</div>
 <div id="refs" class="refs off"></div>
 
+<div id="task-panel" class="off">
+  <div class="sheet">
+    <h2>任务看板</h2>
+    <div class="hint-inline" id="task-sub"></div>
+    <div id="task-cards"></div>
+    <div id="task-bottleneck"></div>
+    <div style="margin-top:16px;text-align:right">
+      <button id="task-close">关闭</button>
+    </div>
+  </div>
+</div>
 <script>
 "use strict";
 
@@ -1359,6 +1424,146 @@ async function testMcp(name, btn) {
   loadMcp();
 }
 
+// ---- 任务看板 ----
+// 「这个任务走到哪了」的可视化。进度条上的 ▶ 是当前状态，
+// 挂起的任务会显示「在等什么」和「恢复条件」。
+// 底部那块「瓶颈」是**最该看的东西**：哪个状态最常被干预，
+// 那就是流程定义最该改的地方。
+async function loadTasks() {
+  let data;
+  try {
+    data = await fetch("/api/tasks").then((r) => r.json());
+  } catch (err) {
+    return;
+  }
+  const active = (data.tasks || []).filter((t) => !t.finished);
+  const badge = $("task-badge");
+  if (badge) {
+    badge.textContent = active.length || "";
+    badge.className = "badge" + (active.length ? "" : " off");
+  }
+  return data;
+}
+
+function progressHtml(task, labels) {
+  // 把 "✓读需求 → ▶实现" 变成带色的
+  const mark = task.blocked ? task.resume_to : task.state;
+  const order = Object.keys(labels);
+  const order_ = ["intake", "branch", "plan", "implement", "integrate", "test", "commit", "submit", "done"];
+  const here = order_.indexOf(mark);
+  return order_
+    .map((state, i) => {
+      const text = labels[state] || state;
+      if (i < here) return `<span class="done">✓${text}</span>`;
+      if (i === here) return `<span class="now">${task.blocked ? "⏸" : "▶"}${text}</span>`;
+      return `<span>·${text}</span>`;
+    })
+    .join(" → ");
+}
+
+function renderTasks(data) {
+  const labels = data.labels || {};
+  const cards = $("task-cards");
+  const tasks = data.tasks || [];
+
+  $("task-sub").textContent = tasks.length
+    ? `${tasks.filter((t) => !t.finished).length} 个进行中，共 ${tasks.length} 个`
+    : "";
+
+  if (!tasks.length) {
+    cards.innerHTML =
+      '<div class="task-empty">还没有任何任务。<br>' +
+      "agent 接到需求后会先建一个任务，之后每推进一步都记在这里。<br>" +
+      "任务状态存在项目里的 <code>.vibe/tasks/</code> —— 换个会话、过一周回来都还在。</div>";
+    $("task-bottleneck").innerHTML = "";
+    return;
+  }
+
+  cards.innerHTML = tasks
+    .map((task) => {
+      const cls = task.finished ? "done" : task.blocked ? "blocked" : "";
+      const stats = task.stats || {};
+      const rate = stats.transitions
+        ? `无干预率 ${Math.round((stats.rate || 0) * 100)}%（${stats.untouched}/${stats.transitions}）`
+        : "还没推进过";
+      const blockers = (task.blockers || [])
+        .map(
+          (b) =>
+            `<div class="tc-block">⏸ 在等：${escapeHtml(b.what)}（${escapeHtml(b.kind)}）<br>` +
+            `　 恢复条件：${escapeHtml(b.check || "（没写）")}` +
+            (b.last_result ? `<br>　 上次检查：${escapeHtml(b.last_result)}` : "") +
+            "</div>"
+        )
+        .join("");
+      const timeline = (task.timeline || [])
+        .slice(-8)
+        .map((t) => {
+          const iv = t.intervention && t.intervention !== "none"
+            ? ` <span class="iv">[${escapeHtml(t.intervention)}]</span>` : "";
+          return `${escapeHtml(t.from_label)} → ${escapeHtml(t.to_label)}${iv}` +
+                 (t.note ? ` ${escapeHtml(t.note.slice(0, 40))}` : "");
+        })
+        .join("<br>");
+
+      return `<div class="task-card">
+        <div class="tc-head">
+          <span class="tc-id">${escapeHtml(task.id)}</span>
+          <span class="tc-title">${escapeHtml(task.title || "")}</span>
+          <span class="tc-state ${cls}">${escapeHtml(task.state_label)}</span>
+        </div>
+        <div class="tc-progress">${progressHtml(task, labels)}</div>
+        <div class="tc-meta">${escapeHtml(rate)}${
+          task.branch ? " ｜ 分支 " + escapeHtml(task.branch) : ""
+        }${task.next_label ? " ｜ 下一步 " + escapeHtml(task.next_label) : ""}</div>
+        ${blockers}
+        ${timeline ? `<div class="tc-timeline">${timeline}</div>` : ""}
+      </div>`;
+    })
+    .join("");
+
+  // 瓶颈：跨任务统计哪个状态最常被干预
+  const bottleneck = data.bottleneck || {};
+  const rows = Object.entries(bottleneck)
+    .map(([state, counts]) => ({
+      state: labels[state] || state,
+      total: counts.total,
+      touched: counts.touched,
+      rate: counts.total ? counts.touched / counts.total : 0,
+    }))
+    .filter((row) => row.total >= 2 && row.rate > 0)
+    .sort((a, b) => b.rate - a.rate);
+
+  $("task-bottleneck").innerHTML = rows.length
+    ? `<div class="bottleneck"><strong>哪一步最常被干预</strong>（这就是流程定义最该改的地方）<br>` +
+      rows
+        .map(
+          (row) =>
+            `　${escapeHtml(row.state)}：${row.touched}/${row.total} 次被干预（${Math.round(row.rate * 100)}%）`
+        )
+        .join("<br>") +
+      "</div>"
+    : "";
+}
+
+async function showTasks() {
+  const data = await loadTasks();
+  if (data) renderTasks(data);
+  $("task-panel").classList.remove("off");
+}
+
+function bindTasks() {
+  const open = $("btn-tasks");
+  if (open) open.addEventListener("click", showTasks);
+  const close = $("task-close");
+  if (close) close.addEventListener("click", () => $("task-panel").classList.add("off"));
+  const panel = $("task-panel");
+  if (panel) {
+    panel.addEventListener("click", (e) => {
+      if (e.target === panel) panel.classList.add("off");
+    });
+  }
+}
+
 async function showStorage() {
   // 启动时把「会话写哪、记忆仓库配没配、会不会自动推」摆出来。
   // 「配了远端但记录还写在本地」排查起来最费劲——配置对、路径也对，
@@ -1954,6 +2159,7 @@ function applySettings(data) {
 
     $("set-vision").value = data.vision_model || "";
   loadMcp();
+  loadTasks();
     $("set-auto-approve").checked = !!data.auto_approve;
     $("set-thinking").checked = !!data.show_thinking;
     $("set-env-path").textContent = data.env_path;
@@ -2247,6 +2453,8 @@ document.addEventListener("keydown", (e) => {
 
 // ---------------------------------------------------------------- 启动
 loadModels();
+bindTasks();     // 任务看板：顶栏按钮 + 面板
+loadTasks();     // 徽标上显示进行中的任务数
 // 先把历史渲染完再连事件流：两者并发的话，banner 可能先到，
 // 头部就会漏掉会话那一段（谁先完成是不确定的）。
 loadHistory().then(showStorage).then(loadSidebar).finally(() => connect());
