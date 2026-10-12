@@ -15,6 +15,7 @@ from .git import GIT_TOOLS
 from .inspect import INSPECT_TOOLS, InspectImage
 from .plan import UpdatePlan
 from .remember import Remember
+from .browser import BROWSER_TOOLS
 from .process import PROCESS_TOOLS
 from .render import RENDER_TOOLS
 from .review import REVIEW_TOOLS, ReviewChanges
@@ -79,6 +80,8 @@ def build_registry(
         for tool_cls in RENDER_TOOLS:
             registry.register(tool_cls(workspace, cfg))
         for tool_cls in INSPECT_TOOLS:
+            registry.register(tool_cls(workspace, cfg))
+        for tool_cls in BROWSER_TOOLS:
             registry.register(tool_cls(workspace, cfg))
         for tool_cls in DESIGN_TOOLS:
             registry.register(tool_cls(workspace, cfg))
