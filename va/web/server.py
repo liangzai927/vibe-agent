@@ -967,6 +967,74 @@ class WebApp:
         cap = limit or 20
         return {"files": [{"path": p, "dir": d} for _, p, d in scored[:cap]]}
 
+    def mcp_report(self) -> dict[str, Any]:
+        """MCP 服务器状态。
+
+        **列状态不启动任何 server**——npx 第一次要下载包（几十秒），
+        打开设置就卡住不可接受。真想验证连接得显式点「测试连接」。
+        """
+        manager = self._mcp()
+        if manager is None:
+            return {"configured": [], "servers": []}
+
+        started = set(manager.started())
+        rows = []
+        for name in manager.registered():
+            server = manager.get(name, start=False)[0]
+            row: dict[str, Any] = {
+                "name": name,
+                "connected": name in started and bool(server and server.running),
+                "tools": len(server.tools) if server else 0,
+                "error": (server.last_error if server else "") or "",
+            }
+            if server and server.running:
+                row["tools_detail"] = [
+                    {"name": t.name, "description": (t.description or "").splitlines()[0][:120]
+                     if t.description else ""}
+                    for t in server.tools
+                ]
+                row["logs"] = server.logs[-10:]
+            rows.append(row)
+        return {"configured": manager.registered(), "servers": rows}
+
+    def mcp_test(self, name: str) -> dict[str, Any]:
+        """真去连一次：启动 server、握手、列工具。
+
+        这是**唯一的验证入口**——连不上时把 stderr 日志一起带出来，
+        否则「连不上」三个字什么也说明不了。
+        """
+        manager = self._mcp()
+        if manager is None:
+            return {"ok": False, "error": "这个会话没有 MCP 管理器"}
+
+        server, error = manager.get(name, start=True)
+        if server is None:
+            return {"ok": False, "error": error}
+        if not server.running and not server.tools:
+            return {
+                "ok": False,
+                "error": server.last_error or error or "启动失败，没拿到任何信息",
+                # **必须带上 stderr**：「连不上」三个字什么也说明不了
+                "logs": server.logs[-20:],
+            }
+        return {
+            "ok": True,
+            "tools": [
+                {
+                    "name": t.name,
+                    "description": (t.description or "").strip()[:300],
+                    "schema": t.schema,
+                }
+                for t in server.tools
+            ],
+            "logs": server.logs[-10:],
+        }
+
+    def _mcp(self):
+        runtime = self.runtimes.get(self.active_id)
+        agent = getattr(runtime, "agent", None) if runtime else None
+        return getattr(agent, "mcp", None)
+
     def add_workspace(self, path: str) -> dict[str, Any]:
         """把一个文件夹加进注册表。
 
@@ -1428,6 +1496,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self.app.sessions_index())
             return
 
+        if parsed.path == "/api/mcp":
+            self._json(self.app.mcp_report())
+            return
+
         if parsed.path == "/api/storage":
             self._json({"rows": self.app.storage_report()})
             return
@@ -1593,6 +1665,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/mcp/test":
+            payload = self._body()
+            name = str(payload.get("name") or "")
+            self._json(self.app.mcp_test(name))
+            return
+
         if parsed.path == "/api/workspaces":
             payload = self._body()
             if payload.get("default"):

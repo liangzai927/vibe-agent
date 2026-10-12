@@ -46,6 +46,8 @@ class TestHandshake(unittest.TestCase):
         self.assertEqual(echo.schema.get("required"), ["text"])
 
     def test_unknown_server_says_what_is_configured(self):
+        """**名字不存在**和**名字对但起不来**是两回事：
+        前者没有对象可给，后者要给（日志在里面）。"""
         server, error = self.mgr.get("nope")
         self.assertIsNone(server)
         self.assertIn("fake", error, "要列出配了哪些")
@@ -60,8 +62,11 @@ class TestHandshake(unittest.TestCase):
         mgr = McpManager({"x": {"command": "/definitely/not/here"}})
         self.addCleanup(mgr.close_all)
         server, error = mgr.get("x")
-        self.assertIsNone(server)
         self.assertIn("起不来", error)
+        # **失败时也把 server 返回去**：它的 logs 里有 stderr，
+        # 而「起不来」的时候那恰恰是唯一有用的东西
+        self.assertIsNotNone(server, "失败时把对象丢了，日志也跟着丢了")
+        self.assertFalse(server.running)
 
 
 class TestCalling(unittest.TestCase):
@@ -200,3 +205,68 @@ class TestToolsLayer(AgentTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestWebEndpoints(AgentTestCase):
+    """界面里的 MCP 状态和「测试连接」。
+
+    **这是验证连接的唯一可视化入口**——用户不该为了确认「接上了没」
+    去翻日志或敲命令。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from va.web.server import WebApp
+
+        config = self.root / ".vibe" / "workflow.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            "mcp:\n  approve: read\n  servers:\n    fake:\n"
+            f"      command: {sys.executable}\n      args: ['{FAKE}']\n      timeout: 10\n"
+        )
+        self.app = WebApp(self.cfg, self.workspace)
+
+    def test_report_lists_configured_servers(self):
+        report = self.app.mcp_report()
+        self.assertEqual(report["configured"], ["fake"])
+        self.assertEqual(report["servers"][0]["name"], "fake")
+
+    def test_report_does_not_start_anything(self):
+        """打开设置不该去连——npx 第一次要下载包，可能几十秒。"""
+        self.app.mcp_report()
+        self.assertFalse(self.app.mcp_report()["servers"][0]["connected"])
+
+    def test_test_endpoint_connects_and_lists_tools(self):
+        result = self.app.mcp_test("fake")
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertIn("get_selection_code", [t["name"] for t in result["tools"]])
+
+    def test_after_testing_the_report_shows_connected(self):
+        self.app.mcp_test("fake")
+        row = self.app.mcp_report()["servers"][0]
+        self.assertTrue(row["connected"])
+        self.assertEqual(row["tools"], 4)
+        self.assertTrue(row["tools_detail"])
+
+    def test_unknown_server_gives_a_useful_error(self):
+        result = self.app.mcp_test("nope")
+        self.assertFalse(result["ok"])
+        self.assertIn("fake", result["error"], "要列出配了哪些")
+
+    def test_failure_carries_the_server_logs(self):
+        """连不上时「连不上」三个字什么也说明不了——**必须带上 stderr**。
+
+        踩过的坑：server 起不来时把对象丢掉了，日志也跟着丢——而那时候
+        日志恰恰是唯一有用的东西。
+        """
+        config = self.root / ".vibe" / "workflow.yaml"
+        config.write_text(
+            "mcp:\n  servers:\n    broken:\n      command: /definitely/not/here\n"
+        )
+        app = type(self.app)(self.cfg, self.workspace)
+        result = app.mcp_test("broken")
+        self.assertFalse(result["ok"])
+        # 断言「有用的内容」而不是措辞：要指出是哪个命令、为什么失败
+        self.assertIn("/definitely/not/here", result["error"])
+        self.assertIn("No such file", result["error"])
+        self.assertIn("logs", result, "失败时必须带回日志字段")

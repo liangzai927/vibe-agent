@@ -51,6 +51,10 @@ class McpTool(WorkspaceTool):
         server, error = self.manager.get(name)
         if server is None:
             raise ToolError(error)
+        if error:
+            # 起不来时把 stderr 带上——那才是排查线索
+            logs = "\n".join(server.logs[-15:])
+            raise ToolError(f"{error}\n{server.name} 的输出：\n{logs}" if logs else error)
         return server
 
 

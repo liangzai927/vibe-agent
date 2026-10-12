@@ -416,7 +416,10 @@ class McpManager:
             ok, detail = server.start()
             if not ok:
                 self._error = detail
-                return None, f"{name} 起不来：{detail}"
+                # **失败时也把 server 返回去**：它的 logs 里有 stderr，
+                # 而「起不来」的时候那恰恰是唯一有用的东西。
+                # 返回 None 等于把排查线索扔掉。
+                return server, f"{name} 起不来：{detail}"
         return server, ""
 
     def all_tools(self) -> list[McpTool]:

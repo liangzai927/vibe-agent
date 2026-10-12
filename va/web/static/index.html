@@ -316,6 +316,31 @@
     font-family: var(--mono); font-size: 12.5px;
   }
   .refs.off { display: none; }
+  .mcp-list { display: flex; flex-direction: column; gap: 6px; }
+  .mcp-row {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px; font-size: 13px;
+  }
+  .mcp-dot { width: 7px; height: 7px; border-radius: 50%; background: #555; flex: none; }
+  .mcp-dot.on { background: #3fb950; box-shadow: 0 0 5px #3fb95088; }
+  .mcp-dot.err { background: #f85149; }
+  .mcp-row .mcp-name { font-family: var(--mono); color: var(--text); }
+  .mcp-row .mcp-meta { color: var(--muted); font-size: 11.5px; margin-left: auto; }
+  .mcp-row button {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 5px;
+    color: var(--text); font-size: 11.5px; padding: 3px 9px; cursor: pointer;
+  }
+  .mcp-row button:hover { border-color: var(--accent); color: var(--accent); }
+  .mcp-row button:disabled { opacity: .5; cursor: default; }
+  .mcp-detail {
+    margin-top: 8px; background: #0d1117; border: 1px solid var(--border);
+    border-radius: 6px; padding: 9px 11px; font-size: 12px;
+    font-family: var(--mono); color: var(--muted); white-space: pre-wrap;
+    max-height: 260px; overflow-y: auto;
+  }
+  .mcp-detail .ok { color: #3fb950; }
+  .mcp-detail .bad { color: #f85149; }
   .refs .refs-loading { color: var(--muted); cursor: default; }
   .refs .refs-loading:hover { background: none; color: var(--muted); }
   .refs div { padding: 5px 11px; cursor: pointer; white-space: nowrap; }
@@ -539,6 +564,20 @@ projects/&lt;项目名-哈希&gt;/sessions/      这个项目的对话记录</pr
           用来读懂设计图上的文字和语义。留空的话，主模型自己能读图就沿用主模型。
           可以在 <code>/models</code> 里看哪些标着「可读图」。
         </div>
+        <div class="field" style="margin-top:14px">
+          <label>MCP 服务器</label>
+          <div id="mcp-list" class="mcp-list">
+            <div class="hint-inline">读取中…</div>
+          </div>
+          <div class="hint-inline">
+            MCP 是接外部工具的标准协议。MasterGo 的设计稿能力就是通过它接的。
+            配置写在项目里的 <code>.vibe/workflow.yaml</code> 的 <code>mcp.servers</code> 下。
+            <strong>打开设置不会去连它们</strong>（第一次要下载包可能几十秒），
+            要点「测试连接」才会真去连。
+          </div>
+          <div id="mcp-detail" class="mcp-detail" style="display:none"></div>
+        </div>
+
         <input type="text" id="set-vision" placeholder="留空 = 自动">
       </div>
 
@@ -1231,6 +1270,95 @@ function sessionRow(session, block) {
   return row;
 }
 
+// ---- MCP 服务器 ----
+// 这里是「验证连接」的唯一可视化入口：打开设置不会去连（第一次可能几十秒），
+// 点了「测试连接」才真去启动 + 握手 + 列工具，失败时把 stderr 一起带出来。
+async function loadMcp() {
+  const list = $("mcp-list");
+  if (!list) return;
+  try {
+    const data = await fetch("/api/mcp").then((r) => r.json());
+    renderMcp(data);
+  } catch (err) {
+    list.innerHTML = '<div class="hint-inline">读不到 MCP 状态</div>';
+  }
+}
+
+function renderMcp(data) {
+  const list = $("mcp-list");
+  const servers = data.servers || [];
+  if (!servers.length) {
+    list.innerHTML =
+      '<div class="hint-inline">没有配置 MCP 服务器。' +
+      "在 .vibe/workflow.yaml 里加 mcp.servers 就会出现。</div>";
+    return;
+  }
+  list.innerHTML = servers
+    .map((s) => {
+      const dot = s.connected ? "on" : s.error ? "err" : "";
+      const meta = s.connected
+        ? `已连接 · ${s.tools} 个工具`
+        : s.error
+          ? "连接失败"
+          : "未连接";
+      return `<div class="mcp-row" data-name="${escapeHtml(s.name)}">
+        <span class="mcp-dot ${dot}"></span>
+        <span class="mcp-name">${escapeHtml(s.name)}</span>
+        <span class="mcp-meta">${escapeHtml(meta)}</span>
+        <button data-test="${escapeHtml(s.name)}">测试连接</button>
+      </div>`;
+    })
+    .join("");
+
+  list.querySelectorAll("button[data-test]").forEach((btn) => {
+    btn.addEventListener("click", () => testMcp(btn.dataset.test, btn));
+  });
+}
+
+async function testMcp(name, btn) {
+  const detail = $("mcp-detail");
+  btn.disabled = true;
+  btn.textContent = "连接中…";
+  detail.style.display = "block";
+  detail.textContent = `正在连接 ${name}…（第一次可能要下载包，几十秒）`;
+
+  try {
+    const data = await fetch("/api/mcp/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }).then((r) => r.json());
+
+    if (data.ok) {
+      const tools = data.tools || [];
+      detail.innerHTML =
+        `<span class="ok">✓ ${escapeHtml(name)} 连接成功，${tools.length} 个工具</span>\n\n` +
+        tools
+          .map((t) => {
+            const desc = (t.description || "").split("\n")[0].slice(0, 110);
+            return `  ${t.name}\n      ${desc}`;
+          })
+          .join("\n") +
+        (data.logs && data.logs.length
+          ? `\n\n服务端日志：\n` + data.logs.map((l) => "  " + l).join("\n")
+          : "");
+    } else {
+      detail.innerHTML =
+        `<span class="bad">✗ 连接失败</span>\n\n` +
+        escapeHtml(data.error || "未知原因") +
+        (data.logs && data.logs.length
+          ? `\n\n服务端日志（排查就看这个）：\n` +
+            data.logs.map((l) => "  " + l).join("\n")
+          : "");
+    }
+  } catch (err) {
+    detail.textContent = "请求失败：" + err;
+  }
+  btn.disabled = false;
+  btn.textContent = "测试连接";
+  loadMcp();
+}
+
 async function showStorage() {
   // 启动时把「会话写哪、记忆仓库配没配、会不会自动推」摆出来。
   // 「配了远端但记录还写在本地」排查起来最费劲——配置对、路径也对，
@@ -1825,6 +1953,7 @@ function applySettings(data) {
     setRadio("read-scope", data.read_scope || "all");
 
     $("set-vision").value = data.vision_model || "";
+  loadMcp();
     $("set-auto-approve").checked = !!data.auto_approve;
     $("set-thinking").checked = !!data.show_thinking;
     $("set-env-path").textContent = data.env_path;
