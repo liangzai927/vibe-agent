@@ -18,6 +18,7 @@ from .remember import Remember
 from .browser import BROWSER_TOOLS
 from .mcp import MCP_TOOLS
 from .submit import SUBMIT_TOOLS
+from .diagnose import DIAGNOSE_TOOLS
 from .workflow import WORKFLOW_TOOLS
 from .task import TASK_TOOLS
 from .tests import RUN_TESTS_TOOL
@@ -110,6 +111,8 @@ def build_registry(
         for tool_cls in SUBMIT_TOOLS:
             registry.register(tool_cls(ctx))
         for tool_cls in WORKFLOW_TOOLS:
+            registry.register(tool_cls(ctx))
+        for tool_cls in DIAGNOSE_TOOLS:
             registry.register(tool_cls(ctx))
     if ctx is not None and ctx.can_delegate():
         for tool_cls in DELEGATE_TOOLS:
