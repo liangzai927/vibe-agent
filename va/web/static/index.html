@@ -316,6 +316,8 @@
     font-family: var(--mono); font-size: 12.5px;
   }
   .refs.off { display: none; }
+  .refs .refs-loading { color: var(--muted); cursor: default; }
+  .refs .refs-loading:hover { background: none; color: var(--muted); }
   .refs div { padding: 5px 11px; cursor: pointer; white-space: nowrap; }
   .refs div:hover, .refs div.on { background: var(--accent); color: #fff; }
 
@@ -976,6 +978,7 @@ let refItems = [];
 let refIndex = 0;
 let refQuery = null;
 let fileCache = null;       // 工作区文件列表，取一次就够了
+let fileCachePromise = null;
 
 function refsVisible() {
   return !$("refs").classList.contains("off");
@@ -1047,12 +1050,15 @@ function renderRefs() {
 
 async function loadFileCache() {
   if (fileCache) return fileCache;
-  try {
-    fileCache = (await fetch("/api/files?q=").then((r) => r.json())).files || [];
-  } catch (err) {
-    fileCache = [];
+  if (!fileCachePromise) {
+    // **必须要是全量列表**。服务端默认只给 20 条，拿那 20 条做本地过滤的话，
+    // 用户打什么都是「没结果」——下拉直接消失。
+    fileCachePromise = fetch("/api/files?q=&limit=4000")
+      .then((r) => r.json())
+      .then((d) => (fileCache = d.files || []))
+      .catch(() => (fileCache = []));
   }
-  return fileCache;
+  return fileCachePromise;
 }
 
 async function updateRefs() {
@@ -1069,6 +1075,15 @@ async function updateRefs() {
   const query = text.slice(at + 1);
   if (query === refQuery) return;     // 同一个查询别重排
   refQuery = query;
+
+  if (!fileCache) {
+    // 第一次要遍历整个工作区，可能几百毫秒——先占个位，
+    // 别让用户以为「打不开」而反复删了重打
+    const el = $("refs");
+    el.innerHTML = '<div class="refs-loading">正在读取文件列表…</div>';
+    el.classList.remove("off");
+    positionRefs();
+  }
 
   // **在本地过滤**：每次按键都往服务端要一遍会明显卡顿，
   // 而工作区文件列表在一次会话里几乎不变，取一次就够。
@@ -1092,6 +1107,7 @@ async function updateRefs() {
 
 function resetFileCache() {
   fileCache = null;
+  fileCachePromise = null;
 }
 
 $("input").addEventListener("input", updateRefs);

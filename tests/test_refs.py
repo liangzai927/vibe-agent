@@ -185,3 +185,69 @@ class TestFindFiles(AgentTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestFullListForCaching(AgentTestCase):
+    """空查询是「把全量列表给我」。
+
+    **这是用户报的 bug**：前端缓存了 `GET /api/files?q=`，而服务端只返回
+    默认的 20 条。于是本地过滤永远只能在那 20 个里找——用户打
+    `@AddEditDrawer` 时目标不在其中，下拉直接消失，看起来像「搜索不工作」。
+
+    空查询要给**尽量多**，不是 20 条。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from va.web.server import WebApp
+
+        # 造 300 个文件，把目标藏在深处——这正是「只给 20 条」会漏掉的情形
+        for index in range(300):
+            path = self.root / f"src/mod{index:03d}/file{index:03d}.vue"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+        target = self.root / "src/components/AddEditDrawer.vue"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x", encoding="utf-8")
+
+        self.app = WebApp(self.cfg, self.workspace)
+
+    def test_empty_query_returns_far_more_than_the_default_page(self):
+        files = self.app.find_files("")["files"]
+        self.assertGreater(len(files), 100, "空查询只给了一页，本地过滤就废了")
+
+    def test_the_hidden_file_is_in_the_full_list(self):
+        files = [item["path"] for item in self.app.find_files("")["files"]]
+        self.assertTrue(
+            any("AddEditDrawer" in path for path in files),
+            "目标文件不在全量列表里——前端本地过滤永远找不到它",
+        )
+
+    def test_total_reports_the_real_count(self):
+        data = self.app.find_files("")
+        self.assertGreaterEqual(data["total"], len(data["files"]))
+
+    def test_a_query_still_filters_server_side(self):
+        """有关键词时就地过滤，供终端或其他客户端直接用。"""
+        files = [item["path"] for item in self.app.find_files("AddEditDrawer")["files"]]
+        self.assertEqual(files, ["src/components/AddEditDrawer.vue"])
+
+    def test_an_explicit_limit_is_honoured(self):
+        self.assertLessEqual(len(self.app.find_files("", limit=10)["files"]), 10)
+
+    def test_walk_is_cached(self):
+        """补全每次按键都要这份列表，不缓存的话打字会明显发涩。"""
+        import time
+
+        from va.web.server import _walk_cache
+
+        _walk_cache.clear()
+        self.app.find_files("")
+
+        first = len(_walk_cache)
+        start = time.perf_counter()
+        self.app.find_files("")
+        elapsed = time.perf_counter() - start
+
+        self.assertEqual(len(_walk_cache), first)
+        self.assertLess(elapsed, 0.05, "第二次还是慢，说明没走缓存")

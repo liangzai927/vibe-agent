@@ -80,6 +80,63 @@ class SessionRuntime:
         return self.worker is not None and self.worker.is_alive()
 
 
+#: 遍历结果缓存的存活时间。补全每敲一个字都要用，
+#: 而工作区文件在一次会话里几乎不变，缓存 30 秒足够。
+WALK_TTL_SECONDS = 30.0
+#: 最多遍历多少个路径。防止在巨大的目录上卡死。
+WALK_MAX_PATHS = 40_000
+#: 空查询（「给我全量列表」）最多返回多少条。
+FULL_LIST_LIMIT = 4_000
+
+_walk_cache: dict[str, tuple[float, list[tuple[str, bool]]]] = {}
+
+
+def _walk_workspace(root: Path) -> list[tuple[str, bool]]:
+    """遍历工作区，返回 ``[(相对路径, 是否目录)]``。带短期缓存。
+
+    **必须缓存**：补全在每次按键时都要这份列表，而遍历一棵几千文件的树
+    要几十到几百毫秒——不缓存的话打字会明显发涩。
+    """
+    from ..refs import INLINE_SKIP_DIRS
+
+    key = str(root)
+    now = time.time()
+    cached = _walk_cache.get(key)
+    if cached is not None and now - cached[0] < WALK_TTL_SECONDS:
+        return cached[1]
+
+    found: list[tuple[str, bool]] = []
+    try:
+        for path in root.rglob("*"):
+            if len(found) >= WALK_MAX_PATHS:
+                break
+            try:
+                rel = path.relative_to(root)
+            except ValueError:
+                continue
+            parts = rel.parts
+            if any(part in INLINE_SKIP_DIRS for part in parts):
+                continue
+            # 跳过隐藏目录（.github 例外），但不跳过隐藏文件本身
+            if any(part.startswith(".") and part != ".github" for part in parts[:-1]):
+                continue
+            is_dir = path.is_dir()
+            found.append((str(rel) + ("/" if is_dir else ""), is_dir))
+    except OSError:
+        pass
+
+    _walk_cache[key] = (now, found)
+    return found
+
+
+def invalidate_walk_cache(root: Path | None = None) -> None:
+    """工作区变了之后（切会话、新建文件）清掉缓存。"""
+    if root is None:
+        _walk_cache.clear()
+    else:
+        _walk_cache.pop(str(root), None)
+
+
 def _fuzzy_score(query: str, text: str) -> int:
     """子序列匹配的打分。0 表示不匹配。
 
@@ -292,6 +349,7 @@ class WebApp:
             id=session_id, workspace=workspace, ui=ui, agent=agent, store=store
         )
         self._activate(session_id)
+        invalidate_walk_cache()
         return {"ok": True, "session": self.session_info(), "reused": False}
 
     # ------------------------------------------------------------- 设置
@@ -871,51 +929,43 @@ class WebApp:
 
     # ------------------------------------------------------------- 工作区与会话管理
 
-    def find_files(self, query: str, *, limit: int = 20) -> dict[str, Any]:
+    def find_files(self, query: str = "", *, limit: int = 0) -> dict[str, Any]:
         """给 `@` 自动补全用的文件列表。
 
-        模糊匹配而不是前缀匹配——你多半记得「auth」不记得它在哪个目录下。
-        匹配的是**相对路径**，所以打 `src/auth` 和打 `auth` 都能找到。
+        **空查询是「把全量列表给我」的意思**，调用方拿它在前端做本地过滤，
+        这样逐字输入时不用每次往返。所以空查询要返回**尽量多**，
+        而不是默认那 20 条——只给 20 条的话，本地过滤永远只能在那 20 个
+        里找，用户打什么都是「没结果」。
+
+        有关键词时就地过滤，供终端或其他客户端直接用。
         """
-        from ..refs import INLINE_SKIP_DIRS
-
         query = (query or "").strip().lstrip("@").lower()
-        root = Path(self.workspace.root)
-        found: list[tuple[int, str]] = []
+        everything = _walk_workspace(Path(self.workspace.root))
 
-        try:
-            for path in root.rglob("*"):
-                if len(found) > limit * 40:
-                    break
-                try:
-                    rel = path.relative_to(root)
-                except ValueError:
-                    continue
-                parts = rel.parts
-                if any(part in INLINE_SKIP_DIRS for part in parts):
-                    continue
-                if any(part.startswith(".") and part not in (".github",) for part in parts[:-1]):
-                    continue
-                # 目录也列出来——`@src` 引用整个目录是有用的，
-                # 而且补全到目录能继续往下点（`@src/` 再补全）
-                is_dir = path.is_dir()
-                text = str(rel) + ("/" if is_dir else "")
-                score = _fuzzy_score(query, str(rel).lower()) if query else 1
-                if is_dir and query:
-                    # 目录降权，但**只在有关键词时**——空查询下
-                    # 1-5 会变成负数被整个滤掉，结果就是「选不到文件夹」。
-                    score -= 5
-                if score > 0:
-                    found.append((score, text, is_dir))
-        except OSError:
-            pass
+        if not query:
+            cap = limit or FULL_LIST_LIMIT
+            # 目录排后面，短的排前面——打开补全时先看到主要的文件
+            ordered = sorted(
+                everything, key=lambda item: (item[1], len(item[0]), item[0])
+            )
+            return {
+                "files": [{"path": p, "dir": d} for p, d in ordered[:cap]],
+                "total": len(everything),
+                "truncated": len(everything) > cap,
+            }
 
-        found.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
-        return {
-            "files": [
-                {"path": name, "dir": is_dir} for _, name, is_dir in found[:limit]
-            ]
-        }
+        scored: list[tuple[int, str, bool]] = []
+        for path, is_dir in everything:
+            score = _fuzzy_score(query, path.lower())
+            if score <= 0:
+                continue
+            if is_dir:
+                score -= 5      # 「看一下 @auth」多半指 auth.ts 不是 auth/
+            scored.append((score, path + ("/" if is_dir else ""), is_dir))
+
+        scored.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+        cap = limit or 20
+        return {"files": [{"path": p, "dir": d} for _, p, d in scored[:cap]]}
 
     def add_workspace(self, path: str) -> dict[str, Any]:
         """把一个文件夹加进注册表。
@@ -1385,7 +1435,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/files":
             params = parse_qs(parsed.query)
             query = (params.get("q") or [""])[0]
-            self._json(self.app.find_files(query))
+            try:
+                limit = int((params.get("limit") or ["0"])[0])
+            except ValueError:
+                limit = 0
+            self._json(self.app.find_files(query, limit=limit))
             return
 
         if parsed.path == "/api/history":
