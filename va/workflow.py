@@ -147,6 +147,21 @@ SCHEMA: dict[str, dict[str, Field]] = {
         "visual_threshold": Field(
             0.01, float, "样式还原的差异阈值（0.01 = 1%）"
         ),
+        "visual_freeze_time": Field(
+            "2026-01-01T00:00:00",
+            str,
+            "截图时把页面时间冻到这一刻。不冻的话日期/时间戳每次都在变，"
+            "像素差异会虚高到没法用",
+        ),
+        "visual_seed": Field(
+            42, int, "冻住随机数的种子。不冻的话随机数据每次不同"
+        ),
+        "visual_stabilize": Field(
+            True,
+            bool,
+            "截图前是否做稳定化（冻时间/停动画/固定随机/等字体）。"
+            "**关掉的话像素差异数字基本没有意义**",
+        ),
         "visual_designs": Field("", str, "设计稿目录。留空表示不做样式还原"),
         "gate": Field(
             "strict",

@@ -343,9 +343,10 @@ class BrowserRun(WorkspaceTool):
             return f"按了 {key}"
 
         if doing == "snapshot":
+            note = self._stabilize(page)
             path = self._shot(page, action.get("label") or "step")
             shots.append(path)
-            return f"截图 {path}"
+            return f"截图 {path} ｜ {note}"
 
         locator = _locator(page, action)
 
@@ -417,6 +418,29 @@ class BrowserRun(WorkspaceTool):
         if problems:
             raise ToolError("；".join(problems))
         return "、".join(checks)
+
+    def _stabilize(self, page) -> str:
+        """截图前把页面冻住。
+
+        **不做的话同一页面连截两次都能差 5%**——那个数字没有意义，
+        门禁会被反复误伤，最后你会习惯性绕过它，等于没有。
+        """
+        workflow = getattr(self.ctx, "workflow", None) if self.ctx else None
+        if workflow is not None and not workflow.get("test.visual_stabilize", True):
+            return "（稳定化已关闭）"
+
+        from .. import visual
+
+        frozen = "2026-01-01T00:00:00"
+        seed = 42
+        if workflow is not None:
+            frozen = str(workflow.get("test.visual_freeze_time", frozen) or frozen)
+            seed = int(workflow.get("test.visual_seed", 42) or 42)
+
+        visual.stabilize(page, frozen=frozen, seed=seed)
+        visual.wait_for_fonts(page)
+        visual.settle(page, delay_ms=80)
+        return "已稳定化（冻时间/停动画/固定随机/等字体）"
 
     def _shot(self, page, label: str) -> str:
         from ..paths import screenshots_dir

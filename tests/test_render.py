@@ -293,8 +293,10 @@ class TestPixelDiffTool(AgentTestCase):
 
         result = PixelDiff(self.workspace, self.cfg).run(baseline="a.png", actual="b.png")
 
-        self.assertIn("基本一致", result)
-        self.assertIn("缩放对齐", result, "尺寸不同必须明说，否则容易误判")
+        # **尺寸不一致就不比**，而不是硬比出一个百分比。
+        # 750x1624 和 1440x900 是两个不同的东西，那个百分比只会误导人。
+        self.assertIn("尺寸不一致", result)
+        self.assertIn("没有比对", result, "尺寸不同就该拒绝比对，而不是硬算一个百分比")
 
     def test_missing_file_is_graceful(self):
         self._solid("a.png", (255, 255, 255))

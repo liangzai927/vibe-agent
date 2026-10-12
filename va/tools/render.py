@@ -344,10 +344,32 @@ class PixelDiff(_RenderTool):
             raise ToolError(f"像素对比失败：{exc}") from exc
 
         verdict = _verdict(result.percent)
+
+        # 补上「差异在哪」和「尺寸对不对」。
+        # 「差异 3.2%」没法动手；「差异集中在右上角 y40-180 x980-1360」才能改。
+        # 尺寸不一致时**不硬比**——那比出来的百分比只会误导人。
+        extra = ""
+        try:
+            from ..visual import compare as _compare
+
+            detail = _compare(base_path, actual_path, threshold=_clamp(threshold, 0, 255))
+            if detail["ratio"] is None:
+                return detail["note"]
+            if detail["regions"]:
+                extra = "\n\n差异最大的几块（从上往下改）：\n" + "\n".join(
+                    f"  {r['where']}：y {r['y']}-{r['y'] + r['h']}，x {r['x']}-{r['x'] + r['w']}"
+                    for r in detail["regions"]
+                )
+            if not detail.get("same_size", True):
+                extra += "\n\n⚠ 两张图尺寸不同，比对结果参考价值有限"
+        except Exception:  # noqa: BLE001 - 补充信息拿不到不该让主流程失败
+            pass
+
         return (
             f"{verdict}\n"
             f"  {result.summary()}\n"
             f"  热力图中红色像素就是两张图不一致的位置"
+            f"{extra}"
         )
 
     def preview(self, args: dict[str, Any]) -> str | None:
