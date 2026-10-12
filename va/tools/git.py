@@ -351,6 +351,16 @@ class GitCommit(_GitTool):
                     ctx.ui.note(f"⚠ 提交绕过了测试门禁：{override.strip()}")
                 except Exception:  # noqa: BLE001
                     pass
+                # 记成**严重事故**：它会清零「连续无干预」的计数。
+                # 绕过门禁这件事发生过一次就不能接受，不是「经常发生才不行」。
+                try:
+                    from ..autonomy import AutonomyLog
+
+                    AutonomyLog(self.workspace.root).record(
+                        "gate_override", detail=override.strip()
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             return f"[绕过测试门禁: {override.strip()}]"
 
         raise ToolError(

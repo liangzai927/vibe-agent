@@ -169,6 +169,23 @@ SCHEMA: dict[str, dict[str, Field]] = {
             "测试门禁：strict 不过就不许提交；warn 只警告；off 关闭",
         ),
     },
+    "autonomy": {
+        # **默认人工审核。** 自动推进是「挣来的」——要先证明它值得信任。
+        "mode": Field(
+            "manual", str, "manual 每步推进都要你放行；auto 自己往下走"
+        ),
+        "threshold": Field(
+            0.95, float, "无干预率要到多少才建议开自动（0.95 = 95%）"
+        ),
+        "window_days": Field(7, int, "看最近多少天的记录"),
+        "min_samples": Field(5, int, "至少要有多少次推进记录才做判断"),
+        "confirm_before": Field(
+            ["commit", "submit"],
+            list,
+            "**即使开了自动，这几步仍然要你确认**。"
+            "默认是提交和提测——它们往外推东西，推错了收不回来",
+        ),
+    },
     "mcp": {
         "servers": Field(
             {},
@@ -221,6 +238,7 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "mock.strategy": ("existing_convention", "fixed", "none"),
     "test.gate": ("strict", "warn", "off"),
     "mcp.approve": ("all", "read", "none"),
+    "autonomy.mode": ("manual", "auto"),
     "submit.push_mode": ("direct", "merge_request"),
 }
 

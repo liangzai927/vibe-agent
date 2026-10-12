@@ -422,6 +422,12 @@
     margin-top: 14px; padding: 10px 12px; border-radius: 7px;
     background: #ff9e6410; border: 1px solid #ff9e6440; font-size: 12.5px;
   }
+  .autonomy {
+    margin-top: 12px; padding: 10px 12px; border-radius: 7px;
+    background: var(--panel2); border: 1px solid var(--border); font-size: 12.5px;
+    color: var(--muted); line-height: 1.8;
+  }
+  .autonomy.ready { background: #3fb95012; border-color: #3fb95055; color: #7ee787; }
   .task-empty { color: var(--muted); font-size: 13px; margin-top: 12px; line-height: 1.8; }
 </style>
 </head>
@@ -675,6 +681,7 @@ projects/&lt;项目名-哈希&gt;/sessions/      这个项目的对话记录</pr
     <div class="hint-inline" id="task-sub"></div>
     <div id="task-cards"></div>
     <div id="task-bottleneck"></div>
+    <div id="task-autonomy"></div>
     <div style="margin-top:16px;text-align:right">
       <button id="task-close">关闭</button>
     </div>
@@ -1532,6 +1539,38 @@ function renderTasks(data) {
     }))
     .filter((row) => row.total >= 2 && row.rate > 0)
     .sort((a, b) => b.rate - a.rate);
+
+  // 「挣来的自主权」：够不够格开自动推进。
+  // **要显示出来**，否则它只是个说法——你无从知道挣到了没有。
+  const auto = data.autonomy;
+  const autoEl = $("task-autonomy");
+  if (autoEl) {
+    if (!auto) {
+      autoEl.innerHTML = "";
+    } else {
+      const cls = auto.ready ? "ready" : "";
+      const head = auto.mode === "auto" ? "推进模式：自动" : "推进模式：人工审核";
+      let body = "";
+      if (auto.transitions) {
+        body =
+          `最近 ${auto.window_days} 天：${auto.untouched}/${auto.transitions} 次推进无干预` +
+          `（${Math.round(auto.rate * 100)}%，门槛 ${Math.round(auto.threshold * 100)}%）`;
+        if (auto.incidents && auto.incidents.length) {
+          body += `<br>严重事故 ${auto.incidents.length} 次（清零重算）：` +
+            auto.incidents.map((x) => `<br>　${escapeHtml(x)}`).join("");
+        } else {
+          body += "<br>期间没有严重事故";
+        }
+        body += auto.ready
+          ? '<br><strong>→ 可以开自动推进了</strong>（workflow.yaml 里设 autonomy.mode = auto）'
+          : `<br>→ 还不到时候：${escapeHtml((auto.reasons || []).join("；"))}`;
+      } else {
+        body = `最近 ${auto.window_days} 天没有人工推进记录，还没法判断`;
+      }
+      autoEl.innerHTML =
+        `<div class="autonomy ${cls}"><strong>${escapeHtml(head)}</strong><br>${body}</div>`;
+    }
+  }
 
   $("task-bottleneck").innerHTML = rows.length
     ? `<div class="bottleneck"><strong>哪一步最常被干预</strong>（这就是流程定义最该改的地方）<br>` +

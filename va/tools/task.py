@@ -132,6 +132,30 @@ class TaskAdvance(_TaskTool):
         "required": ["task_id"],
     }
 
+    def needs_approval(self, args: dict[str, Any]) -> bool:
+        """人工模式每步都要放行；自动模式只拦「不可逆」的那几步。
+
+        **三处硬停**（自动模式下也停）：
+          1. 门禁没过 —— 在 _check_gate 里拦，和这里无关
+          2. 需要人决定（需求有歧义、技术选型）—— 靠模型判断，不是机制
+          3. **不可逆动作**（提交、提测）—— confirm_before，默认就是它们
+
+        第 3 条是这里管的：推错了收不回来，所以哪怕开了自动也要你点头。
+        """
+        workflow = getattr(self.ctx, "workflow", None)
+        mode = "manual"
+        confirm_before = ["commit", "submit"]
+        if workflow is not None:
+            mode = str(workflow.get("autonomy.mode", "manual"))
+            confirm_before = list(
+                workflow.get("autonomy.confirm_before", confirm_before) or []
+            )
+
+        if mode == "manual":
+            return True
+        target = str(args.get("to") or "").strip()
+        return target in confirm_before
+
     def run(
         self,
         task_id: str,
@@ -166,6 +190,13 @@ class TaskAdvance(_TaskTool):
 
         # 门禁参与推进：提交那一步不能绕过去
         gate_note = self._check_gate(target, intervention)
+
+        # 开了自动模式时，没被人工放行的推进就是自动推进。
+        # **这会影响统计**——自动推进不该计入无干预率的分母。
+        workflow = getattr(self.ctx, "workflow", None)
+        if workflow is not None and str(workflow.get("autonomy.mode", "manual")) == "auto":
+            if trigger == "human" and not self.needs_approval({"to": target}):
+                trigger = "auto"
 
         previous = task.state
         # **先记再改状态**。record() 从 self.state 取「从哪来」，

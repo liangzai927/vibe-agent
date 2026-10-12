@@ -1042,11 +1042,38 @@ class WebApp:
                 bucket["total"] += counts["total"]
                 bucket["touched"] += counts["touched"]
 
+        # 「能不能开自动推进」的判定。**看板要显示它**——
+        # 否则「挣来的自主权」只是个说法，你无从知道挣到了没有。
+        try:
+            from ..autonomy import evaluate as evaluate_autonomy
+            from ..task import TaskStore as _Store
+
+            readiness = evaluate_autonomy(
+                _Store(workspace.root if hasattr(workspace, "root") else workspace).all(),
+                workspace.root if hasattr(workspace, "root") else workspace,
+                getattr(runtime, "agent", None) and runtime.agent.workflow,
+            )
+            autonomy_info = {
+                "mode": readiness.mode,
+                "ready": readiness.ready,
+                "rate": readiness.rate,
+                "transitions": readiness.transitions,
+                "untouched": readiness.untouched,
+                "threshold": readiness.threshold,
+                "window_days": readiness.window_days,
+                "incidents": [i.describe() for i in readiness.incidents],
+                "reasons": readiness.reasons,
+                "text": readiness.describe(),
+            }
+        except Exception:  # noqa: BLE001 - 算不出来不该让看板挂掉
+            autonomy_info = None
+
         return {
             "tasks": rows,
             "states": list(STATES),
             "labels": STATE_LABELS,
             "bottleneck": bottleneck,
+            "autonomy": autonomy_info,
         }
 
     def mcp_report(self) -> dict[str, Any]:
