@@ -96,6 +96,12 @@ def _describe(action: dict[str, Any]) -> str:
 
 
 class BrowserRun(WorkspaceTool):
+    #: 由 tools/__init__ 注入。有 ctx 时会把功能测试结果记进门禁台账——
+    #: 它**就是**功能测试的产生者，让调用方另外再报一次是多余的。
+    def __init__(self, workspace, cfg=None, ctx=None) -> None:
+        super().__init__(workspace, cfg)
+        self.ctx = ctx
+
     name = "browser_run"
     description = (
         "在浏览器里打开页面并执行一串操作，用于**功能测试**。\n"
@@ -274,9 +280,39 @@ class BrowserRun(WorkspaceTool):
         #   1. 语义上「测试失败」就是失败——把它当成功会让模型以为通过了
         #   2. 后面的测试门禁要能**机器判定**，靠读文本里有没有 ✗ 太脆弱
         # 完整报告原样放进错误信息，信息一点不少。
+        self._record(results)
+
         if any(not item["ok"] for item in results):
             raise ToolError(report)
         return report
+
+    def _record(self, results: list[dict[str, Any]]) -> None:
+        """把这次操作的结果记进门禁台账。
+
+        只有**带断言的动作**才算「测试」——一次纯点击不构成验证。
+        没有断言的序列不记，免得把「随便点了两下」当成功能测试通过。
+        """
+        ledger = getattr(self.ctx, "ledger", None) if self.ctx is not None else None
+        if ledger is None:
+            return
+        asserts = [r for r in results if str(r.get("what", "")).startswith("assert")]
+        if not asserts:
+            return
+
+        from ..gate import fingerprint
+
+        passed = sum(1 for r in asserts if r["ok"])
+        failed = len(asserts) - passed
+        failures = "；".join(
+            f"{r['what']}: {r.get('error', '')[:80]}" for r in asserts if not r["ok"]
+        )
+        ledger.record(
+            "e2e",
+            passed=passed,
+            failed=failed,
+            fingerprint=fingerprint(self.workspace.root),
+            detail=failures,
+        )
 
     # ---- 单个动作
 

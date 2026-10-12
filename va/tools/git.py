@@ -17,8 +17,10 @@ GIT_TIMEOUT = 180
 
 
 class _GitTool(Tool):
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(self, workspace: Workspace, ctx: Any = None) -> None:
         self.workspace = workspace
+        # 只有提交用得上（测试门禁）。别的 git 工具不需要，所以是可选的。
+        self.ctx = ctx
 
     # ------------------------------------------------------------------ inner
 
@@ -246,22 +248,73 @@ class GitCommit(_GitTool):
                 "items": {"type": "string"},
                 "description": "只提交这些路径（可选，设置后忽略 add_all）",
             },
+            "override_gate": {
+                "type": "string",
+                "description": (
+                    "绕过测试门禁的理由。**只有在明确知道为什么可以跳过时才用**"
+                    "（比如纯文档改动）。理由会写进会话记录，事后能查。"
+                ),
+            },
         },
         "required": ["message"],
     }
     requires_approval = True
+
+    def _check_gate(self, override: str) -> str:
+        """提交前的测试门禁。
+
+        **拦在工具层，不写在提示词里**——「请确保测试通过」是祈祷；
+        提交这个动作本身失败才是门禁。
+
+        返回一段说明（豁免时用），不改动则返回空串。
+        """
+        ctx = self.ctx
+        ledger = getattr(ctx, "ledger", None) if ctx is not None else None
+        if ledger is None:
+            return ""
+
+        workflow = getattr(ctx, "workflow", None)
+        from ..gate import fingerprint
+
+        current = fingerprint(self.workspace.root)
+        verdict = ledger.evaluate(workflow, current=current)
+
+        if verdict.ok:
+            return ""
+
+        if override.strip():
+            # 豁免要留痕：写进会话记录，commit message 也会带标记。
+            # **不阻止**，但让事后能发现。
+            if ctx is not None:
+                try:
+                    ctx.ui.note(f"⚠ 提交绕过了测试门禁：{override.strip()}")
+                except Exception:  # noqa: BLE001
+                    pass
+            return f"[绕过测试门禁: {override.strip()}]"
+
+        raise ToolError(
+            f"{verdict.describe()}\n\n"
+            "**先把测试跑绿再提交。** 如果这次改动确实不需要测试"
+            "（比如只改了文档），用 override_gate 说明理由——会记进会话记录。"
+        )
 
     def run(
         self,
         message: str,
         add_all: bool = True,
         files: list[str] | None = None,
+        override_gate: str = "",
         **_: Any,
     ) -> str:
+        note = self._check_gate(override_gate)
         self._ensure_repo()
         text = message.strip()
         if not text:
             raise ToolError("提交信息不能为空")
+        if note:
+            # 豁免要**留在 commit 里**，不只是在会话记录里——
+            # 事后查 git log 的人也该看得见
+            text = f"{text} {note}"
 
         if files:
             paths = [self.workspace.relative(self.workspace.resolve(p)) for p in files]

@@ -62,6 +62,8 @@ class AgentContext:
     mcp: Any = None  # McpManager
     # 生效的工作流定义。工具的审批策略要读它（比如 mcp.approve）
     workflow: Any = None  # Workflow
+    # 测试台账。提交门禁读它——「不绿不许提交」靠这个成立
+    ledger: Any = None  # TestLedger
     depth: int = 0  # 0 表示这是主 agent
     max_depth: int = 1
 

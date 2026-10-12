@@ -17,6 +17,7 @@ from .plan import UpdatePlan
 from .remember import Remember
 from .browser import BROWSER_TOOLS
 from .mcp import MCP_TOOLS
+from .tests import RUN_TESTS_TOOL
 from .process import PROCESS_TOOLS
 from .render import RENDER_TOOLS
 from .review import REVIEW_TOOLS, ReviewChanges
@@ -76,14 +77,16 @@ def build_registry(
         registry.register(tool_cls(workspace))
     if include_git:
         for tool_cls in GIT_TOOLS:
-            registry.register(tool_cls(workspace))
+            # 传 ctx：git_commit 要用它做测试门禁
+            registry.register(tool_cls(workspace, ctx))
     if include_render:
         for tool_cls in RENDER_TOOLS:
             registry.register(tool_cls(workspace, cfg))
         for tool_cls in INSPECT_TOOLS:
             registry.register(tool_cls(workspace, cfg))
         for tool_cls in BROWSER_TOOLS:
-            registry.register(tool_cls(workspace, cfg))
+            # 传 ctx：browser_run 要把功能测试结果记进门禁台账
+            registry.register(tool_cls(workspace, cfg, ctx))
         for tool_cls in DESIGN_TOOLS:
             registry.register(tool_cls(workspace, cfg))
     for tool_cls in DOCUMENT_TOOLS:
@@ -96,6 +99,8 @@ def build_registry(
         for tool_cls in PROCESS_TOOLS:
             registry.register(tool_cls(ctx))
         for tool_cls in MCP_TOOLS:
+            registry.register(tool_cls(ctx))
+        for tool_cls in RUN_TESTS_TOOL:
             registry.register(tool_cls(ctx))
     if ctx is not None and ctx.can_delegate():
         for tool_cls in DELEGATE_TOOLS:

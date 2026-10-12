@@ -90,6 +90,12 @@ class Agent:
         self.workflow = _workflow
         self.mcp = McpManager(_servers)
 
+        # 测试台账是**会话级、不持久化**的：重启后门禁要求重跑。
+        # 拿旧结果提交有损失，重跑一遍没有。
+        from .gate import TestLedger
+
+        self.ledger = TestLedger()
+
         self.agent_ctx = AgentContext(
             workspace=self.workspace,
             cfg=cfg,
@@ -102,6 +108,7 @@ class Agent:
             processes=self.processes,
             mcp=self.mcp,
             workflow=self.workflow,
+            ledger=self.ledger,
         )
 
         if registry is None:
