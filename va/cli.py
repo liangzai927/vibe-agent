@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
 from . import __version__
-from .config import Config
+from .config import Config, run_hint
 from .diffview import colorize, make_diff
 from .feature import FeatureRequest, describe_flags
 from .feature import run as run_feature
