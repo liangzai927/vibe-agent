@@ -1758,6 +1758,20 @@ class Handler(BaseHTTPRequestHandler):
     # ----------------------------------------------------------- GET
 
     def do_GET(self) -> None:  # noqa: N802
+        try:
+            self._do_GET()
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+
+            print(traceback.format_exc(), file=sys.stderr)
+            try:
+                self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 500)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _do_GET(self) -> None:
         parsed = urlparse(self.path)
 
         if parsed.path in ("/", "/index.html"):
@@ -1943,6 +1957,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404, "not found")
 
     def do_POST(self) -> None:  # noqa: N802
+        # **兜底：任何异常都要变成一句能看的话。**
+        #
+        # 没兜底的话，处理函数里抛出去 = 连接断掉，前端只看到
+        # `TypeError: Failed to fetch`——**什么线索都没有**，
+        # 用户只能来问「为什么切换失败」。
+        try:
+            self._do_POST()
+        except (BrokenPipeError, ConnectionResetError):
+            raise                      # 客户端走了，交给 _QuietServer 吞掉
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+
+            detail = traceback.format_exc()
+            print(detail, file=sys.stderr)      # 终端里留全的，好排查
+            try:
+                self._json(
+                    {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 500
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/mcp/test":
             payload = self._body()

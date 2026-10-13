@@ -1172,3 +1172,62 @@ class TestApprovalOverHTTP(AgentTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestRequestErrorsAreVisible(AgentTestCase):
+    """**请求处理抛异常时不能静默断连。**
+
+    用户报过：任务跑完之后切换会话，界面显示
+
+        切换失败：TypeError: Failed to fetch
+
+    而 `Failed to fetch` 是**网络层**失败——服务端连响应都没给。
+    没有兜底的话，处理函数里抛出去 = 连接断掉，前端拿到的就是这一句，
+    **一点线索都没有**，用户只能来问「为什么切换失败」。
+
+    现在任何异常都变成一句 JSON 错误，而且 traceback 打到终端。
+    """
+
+    def test_an_exception_becomes_a_json_error(self):
+        import json
+        import threading
+        import time
+        import urllib.error
+        import urllib.request
+
+        from va.web.server import WebApp, serve
+
+        app = WebApp(self.cfg, self.workspace)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("故意炸的")
+
+        app.open_session = boom
+
+        thread = threading.Thread(
+            target=lambda: serve(app, host="127.0.0.1", port=8931, open_browser=False),
+            daemon=True,
+        )
+        thread.start()
+        time.sleep(2)
+
+        request = urllib.request.Request(
+            "http://127.0.0.1:8931/api/sessions/xxx/open",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(ctx.exception.code, 500, "没变成 500")
+        payload = json.loads(ctx.exception.read())
+        self.assertFalse(payload["ok"])
+        self.assertIn("故意炸的", payload["error"], "错误信息里没有真正的原因")
+
+    def test_the_frontend_says_where_to_look(self):
+        """`Failed to fetch` 本身没有信息量，界面要指个方向。"""
+        source = (
+            Path(__file__).resolve().parent.parent / "va" / "web" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Failed to fetch", source)
+        self.assertIn("去看跑 va web 的那个终端", source)

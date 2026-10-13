@@ -1794,7 +1794,16 @@ async function openSession(sessionId) {
       `/api/sessions/${encodeURIComponent(sessionId)}/open`, { method: "POST" }
     ).then((r) => r.json());
   } catch (err) {
-    pushNote("error", "切换失败：" + err);
+    // `Failed to fetch` 是**网络层**失败——服务端连响应都没给（多半是崩了
+    // 或者被挡住了）。光显示这个 TypeError 等于什么都没说，
+    // 所以要告诉用户去哪儿找原因。
+    pushNote(
+      "error",
+      String(err).includes("Failed to fetch")
+        ? "切换失败：服务端没有响应。**去看跑 va web 的那个终端**——" +
+          "那里应该有完整的报错（现在会把异常打到终端里，不再静默断连）。"
+        : "切换失败：" + err
+    );
     return;
   }
 
