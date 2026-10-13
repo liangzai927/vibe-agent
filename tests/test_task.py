@@ -15,6 +15,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -600,3 +601,91 @@ class TestNothingPollutesTheProject(AgentTestCase):
 
         migrate_runtime_state(self.root)
         self.assertEqual(store.load("T-1").state, "done", "把已有的覆盖了")
+
+
+class TestTaskStateIsRemindedEveryTurn(AgentTestCase):
+    """**agent 不走流程的根因：只在开头被交代一次，之后再也没有提醒。**
+
+    用户报过：执行任务时不推进步骤，永远是「读需求」，功能写完了
+    也不跑测试、不提交。
+
+    查下来是 `_system_message()` 只在初始化和切模式时调用——
+    **从不在每轮刷新**。模型开头答应了一声「按工作流走」，
+    聊上十几轮就飘了。
+
+    现在 `run()` 每轮重拼一次，把「现在在哪、这一步做什么、
+    做完推进到哪」重新喂给它。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        config = self.root / ".vibe" / "workflow.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("branch:\n  base: main\n", encoding="utf-8")
+
+        from va.loop import Agent
+        from va.ui import UI
+
+        self.agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        self.agent.set_workflow_mode("task")
+
+    def prompt(self) -> str:
+        self.agent._refresh_system_message()
+        return self.agent.system_prompt
+
+    def test_it_says_to_open_a_task_when_there_is_none(self):
+        text = self.prompt()
+        self.assertIn("# 当前任务", text)
+        self.assertIn("还没有任务对象", text)
+        self.assertIn("task_advance", text)
+
+    def test_it_names_the_current_step(self):
+        self.agent.registry.get("task_advance").run(
+            task_id="ORD-1", title="做个筛选", to="branch"
+        )
+        text = self.prompt()
+        self.assertIn("ORD-1", text)
+        self.assertIn("现在在：建分支", text)
+
+    def test_it_says_what_to_do_at_this_step(self):
+        self.agent.registry.get("task_advance").run(task_id="ORD-1", to="branch")
+        text = self.prompt()
+        self.assertIn("这一步要做", text)
+        self.assertIn("ticket", text, "没给出建分支那一步的具体要求")
+
+    def test_it_says_what_to_advance_to(self):
+        """**不推进的话流程就停在那儿了**——所以要明说下一步推到哪。"""
+        self.agent.registry.get("task_advance").run(task_id="ORD-1", to="branch")
+        text = self.prompt()
+        self.assertIn("做完之后调 task_advance 推进", text)
+        self.assertIn("计划", text)
+
+    def test_the_reminder_follows_the_state(self):
+        """推进之后，提示词要跟着变——不然它还是照着旧的那步做。"""
+        advance = self.agent.registry.get("task_advance")
+        advance.run(task_id="ORD-1", to="branch")
+        self.assertIn("建分支", self.prompt())
+
+        advance.run(task_id="ORD-1", to="plan")
+        text = self.prompt()
+        self.assertIn("现在在：计划", text)
+        self.assertNotIn("现在在：建分支", text)
+
+    def test_chat_mode_has_no_task_reminder(self):
+        """对话模式本来就不走工作流——不该塞这些。"""
+        self.agent.set_workflow_mode("chat")
+        self.assertNotIn("# 当前任务", self.prompt())
+
+    def test_blocked_task_shows_what_it_waits_for(self):
+        advance = self.agent.registry.get("task_advance")
+        advance.run(task_id="ORD-1", to="branch")
+        self.agent.registry.get("task_block").run(
+            task_id="ORD-1", what="订单接口", check="GET /api/orders 返回 200"
+        )
+        text = self.prompt()
+        self.assertIn("在等：订单接口", text)
+
+    def test_a_broken_task_store_does_not_break_the_prompt(self):
+        """拼不出任务状态就沿用旧的，**别让对话挂了**。"""
+        with mock.patch("va.task.TaskStore.active", side_effect=OSError("boom")):
+            self.assertEqual(self.agent._task_state_note(), "")

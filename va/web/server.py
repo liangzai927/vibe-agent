@@ -1224,8 +1224,17 @@ class WebApp:
                 "running": True,
             }
 
+        # **模式要说出来。** 用户看到「agent 不走流程」时，第一件该知道的事
+        # 是「现在是不是任务模式」——对话模式本来就不走工作流。
+        try:
+            agent = getattr(runtime, "agent", None)
+            mode = getattr(agent, "workflow_mode", "chat")
+        except Exception:  # noqa: BLE001
+            mode = "chat"
+
         return {
             "tasks": ([running] if running else []) + rows,
+            "mode": mode,
             "running_id": running["id"] if running else "",
             "states": list(STATES),
             "labels": STATE_LABELS,

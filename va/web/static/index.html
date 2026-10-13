@@ -735,6 +735,7 @@ projects/&lt;项目名-哈希&gt;/sessions/      这个项目的对话记录</pr
   <div class="sheet">
     <h2>任务看板</h2>
     <div class="hint-inline" id="task-sub"></div>
+    <div id="task-mode-note"></div>
     <div id="task-cards"></div>
     <div id="task-bottleneck"></div>
     <div id="task-autonomy"></div>
@@ -1525,6 +1526,18 @@ function progressHtml(task, labels) {
 }
 
 function renderTasks(data) {
+  // **先说清楚现在是什么模式。** 「agent 不走流程」最常见的原因就是
+  // 现在在对话模式——那本来就不走工作流，不是坏了。
+  const modeNote = $("task-mode-note");
+  if (modeNote) {
+    modeNote.innerHTML =
+      data.mode === "task"
+        ? ""
+        : `<div class="bottleneck">现在是 <strong>对话模式</strong>——不会走工作流` +
+          `（不建分支、不跑测试、不提交）。<br>` +
+          `要走流程就在输入框上方切到 <strong>[任务]</strong>。</div>`;
+  }
+
   const labels = data.labels || {};
   const cards = $("task-cards");
   const tasks = data.tasks || [];

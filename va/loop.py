@@ -176,6 +176,14 @@ class Agent:
         ``display`` 是给用户看的原文。`@路径` 引用会把文件内容并进
         ``task``，但界面上该显示用户原话——展开后那一大坨不是他写的。
         """
+        # **每一轮都要把「你现在在哪一步」重新喂给它。**
+        #
+        # 原来只在初始化和切模式时拼一次系统提示词，于是模型只在开头被
+        # 交代一次「按工作流走」，之后再也没有提醒——聊上十几轮就飘了，
+        # 该测试不测试、该提交不提交。
+        # 提醒要出现在**每一轮**，才压得住长对话里的漂移。
+        self._refresh_system_message()
+
         self._maybe_compact(force=False)
         self._append(user_message(task))
         # 会话文件里存**展开后**的版本：那是 agent 实际看到的东西，
@@ -328,6 +336,60 @@ class Agent:
 
         return "已停止" + ("（" + "、".join(stopped) + "也停了）" if stopped else "")
 
+    def _task_state_note(self) -> str:
+        """当前任务走到哪了。**每轮都会进提示词**，所以要说得很直接。"""
+        from .task import STATE_LABELS, TaskStore, open_task, step_instruction
+
+        try:
+            store = TaskStore(self.workspace.root)
+            active = store.active()
+        except Exception:  # noqa: BLE001
+            return ""
+
+        if not active:
+            return (
+                "# 当前任务\n"
+                "还没有任务对象。**你的第一个动作应该是开一个**：\n"
+                '    task_advance(task_id="<需求号或简短标识>", title="<一句话>")\n'
+                "它会告诉你这一步该做什么。"
+            )
+
+        task = active[0]
+        lines = [
+            "# 当前任务（每轮都会提醒，别忘）",
+            f"  {task.id}  {task.title}",
+            f"  现在在：{task.label}",
+        ]
+        if task.blocked:
+            for blocker in task.blockers:
+                lines.append(f"  在等：{blocker.what} —— {blocker.check}")
+        instruction = step_instruction(task.state, getattr(self, "workflow", None))
+        if instruction:
+            lines.append("")
+            lines.append("这一步要做：")
+            lines.extend(f"  {line}" for line in instruction.splitlines())
+        nxt = task.next_state()
+        if nxt:
+            lines.append("")
+            lines.append(
+                f"**做完之后调 task_advance 推进到「{STATE_LABELS.get(nxt, nxt)}」**"
+                f"——不推进的话流程就停在这儿了。"
+            )
+        return "\n".join(lines)
+
+    def _refresh_system_message(self) -> None:
+        """按当前状态重拼系统提示词。
+
+        每轮调一次。开销很小（读一个 json 文件），但它是「agent 真的按
+        工作流走」和「agent 开头答应了一声然后忘了」的分界线。
+        """
+        if not self.messages:
+            return
+        try:
+            self.messages[0] = self._system_message()
+        except Exception:  # noqa: BLE001 - 拼不出来就沿用旧的，别让对话挂了
+            pass
+
     def set_workflow_mode(self, mode: str) -> None:
         """切换「对话 / 任务」。
 
@@ -348,6 +410,11 @@ class Agent:
         reminder = self.plan_board.reminder()
         if reminder:
             extra = (extra + "\n\n" + reminder).strip()
+
+        if self.workflow_mode == "task":
+            state = self._task_state_note()
+            if state:
+                extra = (extra + "\n\n" + state).strip()
 
         prompt = build_system_prompt(
             self.workspace,
