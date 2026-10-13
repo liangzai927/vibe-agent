@@ -126,7 +126,11 @@ class AutonomyLog:
 
     @property
     def path(self) -> Path:
-        return self.workspace / ".vibe" / "autonomy.json"
+        # **放数据根，不放项目里。** 这是 agent 的运行日志，不是团队约定——
+        # 它只会无限增长，进 git 也没人看。
+        from .paths import project_dir
+
+        return project_dir(self.workspace) / "autonomy.json"
 
     def incidents(self) -> list[Incident]:
         if not self.path.is_file():

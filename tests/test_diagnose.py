@@ -176,6 +176,8 @@ class TestChangeEffects(AgentTestCase):
     def setUp(self) -> None:
         super().setUp()
         subprocess.run(["git", "init"], cwd=str(self.root), capture_output=True)
+        # 配置改动的历史现在记在数据根——测试要能读到它
+        (self.root / ".vibe").mkdir(exist_ok=True)
 
     def make(self, *, before: int, after: int, before_touched: int, after_touched: int):
         now = time.time()

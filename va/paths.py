@@ -313,3 +313,57 @@ def describe(path: Path) -> str:
     except (OSError, ValueError):
         pass
     return str(path)
+
+
+#: 曾经被错误地写进项目里的运行状态。
+#:
+#: **我把「跨会话可见」和「存在项目里」混为一谈了**——任务状态、事故日志、
+#: 配置变更日志都是 agent 的运行状态，放数据根一样跨会话、跨重启，
+#: 但不污染用户的仓库。放项目里的实际后果是每跑一个任务就多一个 json，
+#: 无限累积。
+_PROJECT_RUNTIME_LEFTOVERS = ("tasks", "autonomy.json", "workflow-history.json")
+
+
+def migrate_runtime_state(workspace: str | Path) -> tuple[int, str]:
+    """把以前误写在项目里的运行状态搬到数据根。
+
+    返回 ``(搬了几个, 说明)``。**只搬不删**——目标已存在就不覆盖，
+    宁可留着让用户自己看，也不能悄悄丢掉他的任务记录。
+    """
+    import shutil
+
+    root = Path(workspace)
+    leftover = root / ".vibe"
+    if not leftover.is_dir():
+        return 0, ""
+
+    target = project_dir(workspace)
+    moved = 0
+    for name in _PROJECT_RUNTIME_LEFTOVERS:
+        source = leftover / name
+        if not source.exists():
+            continue
+        destination = target / name
+        try:
+            if destination.exists():
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
+            moved += 1
+        except OSError:
+            continue
+
+    if not moved:
+        return 0, ""
+
+    # 只剩空的 .vibe/ 就一起收掉（workflow.yaml 还在的话留着）
+    try:
+        if leftover.is_dir() and not any(leftover.iterdir()):
+            leftover.rmdir()
+    except OSError:
+        pass
+
+    return moved, (
+        f"把 {moved} 项运行状态从项目的 .vibe/ 搬到了 {target}\n"
+        f"（任务状态、事故日志这类是 agent 的运行状态，不该堆在你的仓库里）"
+    )

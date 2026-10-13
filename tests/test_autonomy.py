@@ -124,13 +124,18 @@ class TestSevereIncidents(AgentTestCase):
         )
         self.assertTrue(evaluate(tasks, self.root, workflow()).ready)
 
-    def test_incidents_persist_in_the_project(self):
+    def test_incidents_persist_but_not_in_the_project(self):
+        """事故日志是**运行状态**，不是团队约定——放数据根。"""
         AutonomyLog(self.root).record("wrong_branch", detail="推到了 main")
-        self.assertTrue((self.root / ".vibe" / "autonomy.json").is_file())
+        self.assertTrue(AutonomyLog(self.root).path.is_file())
+        self.assertFalse(
+            (self.root / ".vibe" / "autonomy.json").exists(),
+            "日志又被写进项目里了",
+        )
         self.assertEqual(AutonomyLog(self.root).incidents()[0].kind, "wrong_branch")
 
     def test_bad_json_is_not_fatal(self):
-        path = self.root / ".vibe" / "autonomy.json"
+        path = AutonomyLog(self.root).path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{ 不是 json", encoding="utf-8")
         self.assertEqual(AutonomyLog(self.root).incidents(), [])

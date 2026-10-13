@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helpers import AgentTestCase  # noqa: E402
-from va.task import BLOCKED, STATES, Task, TaskStore, open_task  # noqa: E402
+from va.task import BLOCKED, STATES, Task, TaskStore, open_task, tasks_dir  # noqa: E402
 from va.tools.base import ToolError  # noqa: E402
 
 
@@ -106,13 +106,24 @@ class TestStats(unittest.TestCase):
 
 
 class TestStorage(AgentTestCase):
-    def test_lives_in_the_project_not_the_session(self):
-        """**任务状态是项目的事，不是某次对话的事。**
-        换个会话、过一周回来，它还在。"""
+    def test_lives_in_the_data_root_not_the_project(self):
+        """**任务状态是 agent 的运行状态，不是团队约定。**
+
+        我一开始把它放在项目的 `.vibe/tasks/` 下，理由是「任务状态是项目的
+        事」——那个理由把两件事混为一谈了。放项目里的实际后果：每跑一个任务
+        就多一个 json，**无限累积**，用户的仓库里冒出陌生目录。
+
+        放数据根一样能跨会话、跨重启，但不污染仓库。用户报过这个。
+        """
         task, created = open_task(self.root, "ORD-1", "标题")
         self.assertTrue(created)
         TaskStore(self.root).save(task)
-        self.assertTrue((self.root / ".vibe" / "tasks" / "ORD-1.json").is_file())
+
+        self.assertFalse(
+            (self.root / ".vibe" / "tasks").exists(),
+            "任务又被写进项目里了",
+        )
+        self.assertTrue((tasks_dir(self.root) / "ORD-1.json").is_file())
 
     def test_round_trip_keeps_everything(self):
         store = TaskStore(self.root)
@@ -135,7 +146,7 @@ class TestStorage(AgentTestCase):
         self.assertEqual(task.state, "implement")
 
     def test_bad_json_is_skipped_not_fatal(self):
-        directory = self.root / ".vibe" / "tasks"
+        directory = tasks_dir(self.root)
         directory.mkdir(parents=True)
         (directory / "broken.json").write_text("{ 不是 json", encoding="utf-8")
         store = TaskStore(self.root)
@@ -310,7 +321,7 @@ class TestWebBoard(AgentTestCase):
         from va.web.server import WebApp
 
         empty = WebApp(self.cfg, self.workspace)
-        (self.root / ".vibe" / "tasks" / "ORD-9.json").unlink()
+        (tasks_dir(self.root) / "ORD-9.json").unlink()
         self.assertEqual(empty.task_report()["tasks"], [])
 
 
@@ -496,3 +507,96 @@ class TestWorkflowMode(AgentTestCase):
         agent = Agent(self.cfg, UI(empty), workspace=empty)
         agent.set_workflow_mode("task")
         self.assertNotIn("# 工作流", agent.system_prompt)
+
+
+class TestNothingPollutesTheProject(AgentTestCase):
+    """**用户报过这个**：每跑一个任务项目里就多出 `.va`/`.vibe` 的东西。
+
+    我一开始把任务状态放在项目的 `.vibe/tasks/` 下，理由是「任务状态是
+    项目的事，不是某次对话的事」——**那个理由把两件事混为一谈了**：
+
+      · **团队约定**（`workflow.yaml`）→ 项目里，要进 git 共享
+      · **agent 的运行状态**（任务、事故、变更日志）→ 数据根
+        ——一样能跨会话、跨重启，但不污染用户的仓库
+
+    放项目里的实际后果：每跑一个任务就多一个 json，**无限累积**。
+    """
+
+    def test_a_task_does_not_touch_the_project(self):
+        from va.loop import Agent
+        from va.ui import UI
+
+        before = {p.name for p in self.root.iterdir()}
+        agent = Agent(self.cfg, UI(self.workspace), workspace=self.workspace)
+        agent.registry.get("task_advance").run(task_id="T-1", title="测试", to="branch")
+
+        after = {p.name for p in self.root.iterdir()}
+        self.assertEqual(after - before, set(), "跑任务往项目里写了东西")
+
+    def test_an_incident_does_not_touch_the_project(self):
+        from va.autonomy import AutonomyLog
+
+        before = {p.name for p in self.root.iterdir()}
+        AutonomyLog(self.root).record("gate_override", detail="演示")
+        after = {p.name for p in self.root.iterdir()}
+        self.assertEqual(after - before, set(), "事故日志写进项目了")
+
+    def test_a_config_change_keeps_the_convention_in_the_project(self):
+        """**约定要留在项目里**（要进 git 共享），只有运行状态搬走。"""
+        from va.workflow_edit import Change, apply_changes
+
+        apply_changes(self.root, [Change("branch.base", "develop", reason="我们从不从 main 切")])
+        self.assertTrue(
+            (self.root / ".vibe" / "workflow.yaml").is_file(),
+            "约定文件被搬走了——它该留在项目里",
+        )
+        self.assertFalse((self.root / ".vibe" / "workflow-history.json").exists())
+        self.assertTrue((self.root / ".vibe" / "workflow.yaml").read_text().strip())
+
+    def test_old_leftovers_are_migrated_without_losing_data(self):
+        """**只搬不删。** 用户已经产生的任务记录不能因为改了设计就丢掉。"""
+        import json
+
+        from va.paths import migrate_runtime_state
+
+        legacy = self.root / ".vibe" / "tasks"
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "T-old.json").write_text(
+            json.dumps({"id": "T-old", "state": "implement", "transitions": []}),
+            encoding="utf-8",
+        )
+        (self.root / ".vibe" / "workflow.yaml").write_text("branch:\n  base: main\n")
+
+        moved, note = migrate_runtime_state(self.root)
+        self.assertEqual(moved, 1)
+        self.assertIn("搬到了", note)
+
+        self.assertFalse(legacy.exists(), "旧位置还留着")
+        task = TaskStore(self.root).load("T-old")
+        self.assertIsNotNone(task, "数据丢了")
+        self.assertEqual(task.state, "implement")
+        self.assertTrue(
+            (self.root / ".vibe" / "workflow.yaml").is_file(),
+            "约定文件被误搬了",
+        )
+
+    def test_migration_is_idempotent(self):
+        from va.paths import migrate_runtime_state
+
+        self.assertEqual(migrate_runtime_state(self.root)[0], 0)
+
+    def test_migration_never_overwrites(self):
+        """目标已存在就跳过——**宁可留着让你自己看，也不悄悄覆盖**。"""
+        import json
+
+        from va.paths import migrate_runtime_state
+
+        legacy = self.root / ".vibe" / "tasks"
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "T-1.json").write_text('{"id":"T-1","state":"branch"}', encoding="utf-8")
+
+        store = TaskStore(self.root)
+        store.save(Task(id="T-1", state="done"))
+
+        migrate_runtime_state(self.root)
+        self.assertEqual(store.load("T-1").state, "done", "把已有的覆盖了")

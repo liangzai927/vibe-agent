@@ -256,6 +256,18 @@ def _open_session(
     except OSError as exc:
         ui.warn(f"旧会话没能搬过去：{exc}")
 
+    # 以前误写在项目里的运行状态（任务、事故日志）搬到数据根。
+    # **这是 agent 的运行状态，不是团队约定**——放在项目里会随着
+    # 任务变多无限累积，用户会看到自己的仓库里冒出陌生目录。
+    try:
+        from .paths import migrate_runtime_state
+
+        _moved, _note = migrate_runtime_state(root)
+        if _note:
+            ui.info(_note)
+    except OSError:
+        pass
+
     if args.resume:
         try:
             store = SessionStore.open(root, args.resume)

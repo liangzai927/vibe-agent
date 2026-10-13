@@ -193,7 +193,11 @@ def apply_changes(
 
     config.write_text(updated, encoding="utf-8")
 
-    log = root / ".vibe" / "workflow-history.json"
+    # 变更日志放数据根：它是 agent 的记录，不是团队约定。
+    # （配置本身仍然写进项目的 .vibe/workflow.yaml——那个是要进 git 的。）
+    from .paths import project_dir
+
+    log = project_dir(root) / "workflow-history.json"
     entries: list[dict[str, Any]] = []
     if log.is_file():
         try:
@@ -209,6 +213,9 @@ def apply_changes(
             ],
         }
     )
+    # **要自己建目录**——数据根那边的项目目录可能还不存在
+    # （以前写项目的 .vibe/ 时它是现成的，搬过来就漏了这一步）
+    log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(
         json.dumps({"changes": entries[-200:]}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -218,7 +225,9 @@ def apply_changes(
 
 def history(workspace: str | Path) -> list[dict[str, Any]]:
     """改配置的历史——「这条配置为什么是现在这样」。"""
-    path = Path(workspace) / ".vibe" / "workflow-history.json"
+    from .paths import project_dir
+
+    path = project_dir(workspace) / "workflow-history.json"
     if not path.is_file():
         return []
     try:

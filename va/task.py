@@ -372,7 +372,21 @@ def step_instruction(state: str, workflow=None) -> str:
 
 
 def tasks_dir(workspace: str | Path) -> Path:
-    return Path(workspace) / ".vibe" / "tasks"
+    """任务状态放**数据根**，不放项目里。
+
+    **我一开始把它放在项目的 `.vibe/tasks/` 下，理由是「任务状态是项目的
+    事，不是某次对话的事」。那个理由把两件事混为一谈了：**
+
+      · **团队约定**（`workflow.yaml`）→ 项目里，要进 git 共享
+      · **agent 的运行状态**（任务、事故、变更日志）→ 数据根
+        ——一样能跨会话、跨重启，但不污染用户的仓库
+
+    放项目里的实际后果：每跑一个任务就多一个 json 文件，**无限累积**，
+    而且用户会看到他的仓库里冒出陌生的目录。
+    """
+    from .paths import project_dir
+
+    return project_dir(workspace) / "tasks"
 
 
 def _slug(task_id: str) -> str:

@@ -140,7 +140,9 @@ class TestApplyAndHistory(AgentTestCase):
         self.assertEqual(len(history(self.root)), 2)
 
     def test_bad_history_file_is_not_fatal(self):
-        path = self.root / ".vibe" / "workflow-history.json"
+        from va.paths import project_dir
+
+        path = project_dir(self.root) / "workflow-history.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{ 不是 json", encoding="utf-8")
         self.assertEqual(history(self.root), [])

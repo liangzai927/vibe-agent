@@ -233,6 +233,7 @@ class WebApp:
         self.active_id = ""
         self._llm = llm
         self._auto_approve = auto_approve
+        self._migrate_runtime_state()
 
         # 还没开会话时的兜底 UI：命令（/help、/models）也得能答
         self._fallback_ui = WebUI(
@@ -743,6 +744,20 @@ class WebApp:
         """**当前会话**在不在跑。"""
         runtime = self.active()
         return runtime.busy if runtime else False
+
+    def _migrate_runtime_state(self) -> None:
+        """把以前误写在项目里的运行状态搬到数据根。
+
+        CLI 和 web 都会走一遍——**只做 CLI 的话，用界面的人永远迁不掉**。
+        """
+        try:
+            from ..paths import migrate_runtime_state
+
+            moved, note = migrate_runtime_state(self.workspace.root)
+            if note:
+                self.bus.publish("note", level="info", text=note)
+        except Exception:  # noqa: BLE001 - 迁移失败不该挡住启动
+            pass
 
     def any_busy(self) -> SessionRuntime | None:
         """有没有**任何**会话在跑。有就返回那个运行时。
