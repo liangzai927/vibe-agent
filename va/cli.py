@@ -666,10 +666,18 @@ def _web(argv: list[str]) -> int:
         return 2
 
     if not cfg.api_key:
-        print(yellow("还没有配置模型服务。两种做法："), file=sys.stderr)
-        print(dim("  ① 界面上填（推荐）：跑 `va web`，在「设置 → 模型接口」里填"), file=sys.stderr)
-        print(dim(f"  ② 命令行向导：{run_hint('setup')}"), file=sys.stderr)
-        return 2
+        # **界面必须能起来——不然是个死锁。**
+        # 原来的逻辑是「没配 key 就退出，并且建议你『跑 va web 去设置里填』」，
+        # 而用户正在跑 va web：他永远到不了那个设置页。
+        #
+        # 没配 key 不该阻止**打开界面**——设置页就是用来配它的。
+        # 真正需要 key 的时刻是「开始跑任务」，那时候再报错也不迟，
+        # 而且到那时用户已经能点开设置了。
+        print(yellow("还没有配置模型服务——界面能打开，但跑任务前要先配。"), file=sys.stderr)
+        print(dim("  打开后：设置 → 模型接口，填 API Key"), file=sys.stderr)
+        print(dim(f"  或者先跑向导：{run_hint('setup')}"), file=sys.stderr)
+        print(dim("  配置文件：" + str(Config.env_file())), file=sys.stderr)
+        print(file=sys.stderr)
 
     from .web import WebApp, serve
 
@@ -830,10 +838,19 @@ def _setup(argv: list[str]) -> int:
     directory = Path(__file__).resolve().parent.parent
     env_path = Config.env_file(directory)
 
+    # **只在配置「确实能用」的时候才拒绝。**
+    #
+    # 原来只要文件存在就拒绝，于是出现一个死结：.env 在、但里面的 key 是
+    # 空的（比如手动删过、或者被别的东西覆盖过），setup 说「已存在」，
+    # web 说「还没配」——两条路都走不通。
+    # 文件存在不等于配好了。
     if env_path.is_file() and not args.force:
-        print(dim(f"  {env_path} 已存在。要重新配置加 --force；"))
-        print(dim("  只想换模型的话，进入 agent 后用 /model 就行。"))
-        return 0
+        existing = Config.load(directory)
+        if existing.api_key:
+            print(dim(f"  {env_path} 已存在，而且已经配好了。"))
+            print(dim("  要重新配置加 --force；只想换模型的话，进入 agent 后用 /model。"))
+            return 0
+        print(dim(f"  {env_path} 在，但还没有 API Key——继续配置。"))
 
     result = run_setup(
         env_path,

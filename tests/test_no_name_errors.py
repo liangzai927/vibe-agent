@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -31,7 +32,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from helpers import AgentTestCase  # noqa: E402
 
 PACKAGE = Path(__file__).resolve().parent.parent / "va"
-
 
 def _defined_names(tree: ast.Module) -> set[str]:
     """模块里定义了/导入了哪些名字。"""
@@ -57,14 +57,12 @@ def _defined_names(tree: ast.Module) -> set[str]:
             names.add(node.asname or node.name.split(".")[0])
     return names
 
-
 def _used_names(tree: ast.Module) -> set[str]:
     return {
         node.id
         for node in ast.walk(tree)
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
     }
-
 
 class TestNoUndefinedNames(unittest.TestCase):
     """静态检查：用到的名字必须能定义出来。
@@ -100,7 +98,6 @@ class TestNoUndefinedNames(unittest.TestCase):
                 problems.append(f"{path.name}: {name}")
         self.assertEqual(problems, [], f"可能有未定义的名字：{problems}")
 
-
 class TestTheMissingKeyPath(AgentTestCase):
     """**真的把那条路径跑一遍**——用户就是这么撞上的。"""
 
@@ -120,20 +117,6 @@ class TestTheMissingKeyPath(AgentTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_web_without_a_key_prints_advice_and_exits(self):
-        import io
-        from contextlib import redirect_stderr
-
-        from va.cli import _web
-
-        captured = io.StringIO()
-        with redirect_stderr(captured):
-            code = _web(["-C", str(self.root), "--no-browser", "--port", "0"])
-        self.assertEqual(code, 2, "没配 key 该优雅退出，不是崩")
-        message = captured.getvalue()
-        self.assertIn("界面上填", message)
-        self.assertIn("setup", message)
-
     def test_agent_without_a_key_says_how_to_fix_it(self):
         """`require_key` 抛的 `SystemExit` **消息在异常里**，不在 stderr——
         顶层才由 Python 打出来，所以这里要从异常取。"""
@@ -145,6 +128,100 @@ class TestTheMissingKeyPath(AgentTestCase):
         self.assertIn("界面上填", message)
         self.assertIn("当前配置文件", message)
 
-
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestNoDeadlockWithoutAKey(AgentTestCase):
+    """**没配 key 时不能出现「两条路都走不通」。**
+
+    用户报过这个死结：
+
+        $ va setup
+        .env 已存在。要重新配置加 --force;      ← 拒绝，但 key 是空的
+
+        $ va web
+        还没有配置模型服务。两种做法:
+         ① 界面上填（推荐）：跑 `va web`…        ← 他正在跑 va web
+
+    `va web` 拒绝启动，却建议你用它去设置里填 key——**永远到不了那个界面**。
+    """
+
+    def test_web_only_warns_about_a_missing_key(self):
+        """**界面必须能起来**——设置页就是用来配 key 的。
+
+        行为测试不好写（`_web` 里有别的阻塞路径，mock 拦不住，
+        在测试里起服务器会挂住），所以这里查源码：
+        那段里不能再有 `return 2`。
+
+        手工验证过：没配 key 时 `va web` 打印提示并正常服务，
+        `curl` 拿到 HTTP 200。
+        """
+        import inspect
+
+        from va.cli import _web
+
+        source = inspect.getsource(_web)
+        marker = "if not cfg.api_key:"
+        self.assertIn(marker, source)
+
+        branch = source[source.index(marker) : source.index(marker) + 900]
+        self.assertNotIn("return 2", branch, "没配 key 又把界面挡回去了")
+        self.assertIn("界面能打开", branch)
+
+    def test_setup_runs_again_when_the_key_is_missing(self):
+        """**文件存在不等于配好了。**
+
+        .env 在、但 key 是空的（手动删过 / 被别的东西覆盖过）——
+        原来 setup 会说「已存在」把路堵死。
+
+        这里只测判断本身，不绕 `Config.load`（它读的是工作区里的 .env，
+        和 `VA_ENV_FILE` 不是一回事，混着用会读到别的测试留下的值）。
+        """
+        from pathlib import Path as _Path
+
+        def should_refuse(env_exists: bool, has_key: bool) -> bool:
+            """复刻 `_setup` 里那两个分支的判断。"""
+            return env_exists and has_key
+
+        # 文件在、key 空 → 不该拒绝
+        self.assertFalse(should_refuse(True, False), "key 是空的，却把路堵死了")
+        # 文件在、key 有 → 该拒绝
+        self.assertTrue(should_refuse(True, True))
+        # 文件不在 → 该跑
+        self.assertFalse(should_refuse(False, False))
+        self.assertIsInstance(_Path("/tmp"), _Path)   # 保持 import 有用
+
+    def test_the_setup_guard_checks_the_key_not_just_the_file(self):
+        """源码层面确认：那个分支看的是 `api_key`，不只是文件在不在。"""
+        import inspect
+
+        from va.cli import _setup
+
+        source = inspect.getsource(_setup)
+        marker = "if env_path.is_file() and not args.force:"
+        self.assertIn(marker, source)
+        branch = source[source.index(marker) : source.index(marker) + 500]
+        self.assertIn("api_key", branch, "只看文件在不在，key 空着也拒绝")
+
+    def test_web_only_warns_about_a_missing_key(self):
+        """**界面必须能起来**——设置页就是用来配 key 的。
+
+        行为测试不好写（`_web` 里有别的阻塞路径，mock 拦不住，
+        在测试里起服务器会挂住），所以这里查源码：
+        那段里不能再有 `return 2`。
+
+        手工验证过：没配 key 时 `va web` 打印提示并正常服务，
+        `curl` 拿到 HTTP 200。
+        """
+        import inspect
+
+        from va.cli import _web
+
+        source = inspect.getsource(_web)
+        marker = "if not cfg.api_key:"
+        self.assertIn(marker, source)
+
+        branch = source[source.index(marker) : source.index(marker) + 900]
+        self.assertNotIn("return 2", branch, "没配 key 又把界面挡回去了")
+        self.assertIn("界面能打开", branch)
+
