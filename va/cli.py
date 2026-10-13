@@ -55,6 +55,7 @@ HELP = """可用命令：
   va web                                                    浏览器界面（可视化，支持拖拽传图）
   va setup                                                  首次配置（也可以直接启动，没配会自己引导）
   va doctor [--offline] [--quick] [--json]                  环境自检
+  va update [--check] [-y]                                  更新到最新版
   va feature "需求描述" [--doc X --design Y]                 功能开发流水线
 """
 
@@ -138,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         ("setup", _setup),
         ("web", _web),
         ("workflow", _workflow),
+        ("update", _update),
     ):
         split = split_subcommand(raw, name)
         if split is None:
@@ -719,6 +721,75 @@ def _web(argv: list[str]) -> int:
         open_browser=not args.no_browser,
         window=args.window,
     )
+
+
+# --------------------------------------------------------------------- update
+
+
+def _update(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="va update",
+        description="把 vibe-agent 更新到最新版（按当初的安装方式走）",
+    )
+    parser.add_argument("--check", action="store_true", help="只检查有没有新版本，不动任何东西")
+    parser.add_argument("-y", "--yes", action="store_true", help="不确认，直接更新")
+    args = parser.parse_args(argv)
+
+    from .update import check, current_revision, detect, plan, run
+
+    install = detect()
+    print(bold("更新 vibe-agent"))
+    print(dim(f"  安装方式：{install.label}"))
+    print(dim(f"  判断依据：{install.reason}"))
+    print(dim(f"  当前版本：{current_revision(install)}"))
+    print()
+
+    if not install.can_self_update:
+        # **认不出就明说怎么做**，不硬猜一个命令跑下去——
+        # 猜错了可能把用户的环境弄坏。
+        _commands, note = plan(install)
+        print(yellow("这份认不出安装方式，没法自动更新。"))
+        print()
+        print(note)
+        return 2
+
+    fresh, note = check(install)
+    if not fresh:
+        print(green(f"✓ {note}"))
+        return 0
+    print(cyan(note))
+    print()
+
+    commands, why = plan(install)
+    print(f"  {why}")
+    for command in commands:
+        print(dim(f"    $ {command}"))
+    print()
+
+    if not args.yes and sys.stdin.isatty():
+        answer = input("  继续？[y/N] ").strip().lower()
+        if answer not in ("y", "yes", "是"):
+            print(dim("  已取消。"))
+            return 0
+    elif not args.yes:
+        # 非交互（比如被脚本调起来）时**不擅自更新**，只说清楚怎么跑
+        print(dim(f"  非交互环境，没有执行。要更新就加 -y：{run_hint('update -y')}"))
+        return 0
+
+    print()
+    print(dim("  正在更新…"))
+    ok, output = run(install, executable=sys.executable)
+    print()
+    if ok:
+        print(green("✓ 更新完成"))
+        print(dim(f"  现在是：{current_revision(install)}"))
+        print(dim(output[-500:]) if output else "")
+        return 0
+
+    print(red("✗ 更新失败"))
+    print()
+    print(output)
+    return 1
 
 
 # --------------------------------------------------------------------- workflow
