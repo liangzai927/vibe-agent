@@ -39,6 +39,14 @@ if _existing_home and _TEST_HOME_MARKER in _existing_home:
 else:
     _TEST_HOME = Path(tempfile.mkdtemp(prefix=_TEST_HOME_MARKER))
     os.environ["VA_HOME"] = str(_TEST_HOME)
+    # **配置写入也要重定向。**
+    #
+    # 漏了这一条的后果不是「测试不准」，而是**测试真的改了用户的配置**：
+    # WebApp 的 env_path 默认指向包目录下的 .env，于是
+    # `update_settings({"api_key": ...})` 会直接覆盖真实密钥。
+    # 这个坑我踩过一次（把真 key 覆盖成了测试用的假 key），
+    # 所以这里是结构性防护，不是「记得传参数」。
+    os.environ["VA_ENV_FILE"] = str(_TEST_HOME / ".env")
     atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

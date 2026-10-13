@@ -133,6 +133,8 @@ class SessionStore:
     def __init__(self, path: Path, meta: SessionMeta) -> None:
         self.path = path
         self.meta = meta
+        #: 这次会话拦下的密钥种类（给用户看的）
+        self._redactions: list[str] = []
         self._handle = None
 
     # ------------------------------------------------------------ 创建/打开
@@ -287,15 +289,44 @@ class SessionStore:
             os.fsync(handle.fileno())
         self.meta.updated_at = time.time()
 
+    def _scrub(self, message: dict[str, Any]) -> dict[str, Any]:
+        """落盘前脱敏。
+
+        **这是唯一的写入出口，所以拦在这里。**
+
+        会话记录会同步到 git 远端（记忆仓库）。一旦密钥进了那里，
+        它就不只是本机的一个文件——它已经在别人的服务器上，而且进了
+        git 历史，**删文件是删不掉的**。
+
+        实际的泄漏路径很普通：agent 执行了一条命令，工具结果里带了密钥，
+        而工具结果是原样写进会话文件的。
+        """
+        from .secrets import redact_message
+
+        cleaned, found = redact_message(message)
+        if found:
+            self._redactions.extend(found)
+        return cleaned
+
+    @property
+    def redactions(self) -> list[str]:
+        """这次会话里拦下了哪些密钥。**要给用户看到**——
+        他不该在毫不知情的情况下被保护。"""
+        return list(getattr(self, "_redactions", []))
+
     def append_message(self, message: dict[str, Any]) -> None:
         if message.get("role") == "system":
             return  # 系统提示词每次重建，不落盘
-        self._append_raw({"type": "message", "message": message, "ts": time.time()})
+        self._append_raw(
+            {"type": "message", "message": self._scrub(message), "ts": time.time()}
+        )
         self.meta.message_count += 1
 
     def append_compact(self, messages: list[dict[str, Any]]) -> None:
         """压缩后整体替换：把当前完整消息列表存一份快照。"""
-        payload = [m for m in messages if m.get("role") != "system"]
+        payload = [
+            self._scrub(m) for m in messages if m.get("role") != "system"
+        ]
         self._append_raw({"type": "compact", "messages": payload, "ts": time.time()})
         self.meta.message_count = len(payload)
 
