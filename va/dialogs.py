@@ -31,9 +31,19 @@ _MACOS_SCRIPT = """on run argv
 end run
 """ % CANCELLED
 
+#: 提示语通过**环境变量**传，不走命令行参数。
+#:
+#: 踩过的坑：原来写的是
+#:     [shell, "-NoProfile", "-STA", "-Command", _WINDOWS_SCRIPT, prompt]
+#: 而 **`-Command` 会把后面所有东西都当成脚本体**——于是 prompt（比如
+#: 「选择文件夹」）被 PowerShell 当成一条**命令**去执行，直接在 Windows 上报：
+#:     CommandNotFoundException
+#:     + FullyQualifiedErrorId : CommandNotFoundException
+#: 同时 `$args[0]` 也是空的。
+#: 环境变量没有引号、没有参数切分，这类问题一次性绕开。
 _WINDOWS_SCRIPT = """Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = $args[0]
+$dialog.Description = $env:VA_PICK_PROMPT
 $dialog.ShowNewFolderButton = $true
 if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     [Console]::Out.Write($dialog.SelectedPath)
@@ -79,10 +89,17 @@ def available() -> tuple[bool, str]:
     return False, "需要 zenity（GNOME）或 kdialog（KDE）"
 
 
-def _run(command: list[str], *, stdin: str | None = None, timeout: int) -> subprocess.CompletedProcess:
+def _run(
+    command: list[str],
+    *,
+    stdin: str | None = None,
+    timeout: int,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         command,
         input=stdin,
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -119,9 +136,22 @@ def pick_folder(prompt: str = "选择文件夹", *, timeout: int = DEFAULT_TIMEO
             shell = shutil.which("pwsh") or shutil.which("powershell")
             if not shell:
                 return PickResult(False, error="找不到 PowerShell")
+
+            import os
+            import platform as _platform
+
+            argv = [shell, "-NoProfile", "-Command", _WINDOWS_SCRIPT]
+            # **`-STA` 只有 Windows PowerShell 5.1 需要**（WinForms 要求单线程
+            # 单元）。PowerShell 7（pwsh）默认就是 STA，而且不认识这个开关——
+            # 传了会让它也报错。
+            if "pwsh" not in os.path.basename(shell).lower():
+                argv.insert(2, "-STA")
+
             result = _run(
-                [shell, "-NoProfile", "-STA", "-Command", _WINDOWS_SCRIPT, prompt],
+                argv,
                 timeout=timeout,
+                # 提示语走环境变量，不占命令行位置
+                env={**os.environ, "VA_PICK_PROMPT": prompt},
             )
         else:
             if shutil.which("zenity"):

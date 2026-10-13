@@ -94,9 +94,16 @@ else
         --exclude=.venv --exclude=venv --exclude=__pycache__
         --exclude=.git --exclude='*.pyc'
         --exclude=.env --exclude=.env.local --exclude='.env.*.local'
-        --exclude=dist --exclude='*.egg-info' --exclude=.pytest_cache
+        --exclude=dist --exclude=build --exclude='*.egg-info' --exclude=.pytest_cache
         --exclude=.mypy_cache --exclude=.ruff_cache
+        # build/ 是 pip wheel / pip install 的中间产物（近 1MB）。
+        # 漏掉它的话「打一次包 → 再打一次」会越滚越大。
+        --exclude=build
         --exclude=.DS_Store --exclude='._*'
+        # **文档截图不用带。** docs/ 里的 PNG 加起来 1.2MB，占了整个包的一多半,
+        # 而运行根本不需要它们——要看图去仓库里看。
+        # （文字文档照常带，那些小而且有用。）
+        --exclude='docs/*.png' --exclude='docs/**/*.png' 
     )
     [ "$KEEP_SESSIONS" = "1" ] || EXCLUDES+=(--exclude=.va)
     tar "${TAR_COMPAT[@]}" "${EXCLUDES[@]}" -czf "$OUT_ABS" \

@@ -121,8 +121,24 @@ class Config:
         explicit = (os.environ.get("VA_ENV_FILE") or "").strip()
         if explicit:
             return Path(explicit).expanduser()
+
         root = pkg_root or Path(__file__).resolve().parent.parent
-        return root / ".env"
+
+        # **从源码跑还是装出来的，配置该放两个不同的地方。**
+        #
+        # 仓库里（旁边有 run.py / .git）→ 放仓库的 .env，开发时看得见、好改。
+        #
+        # 装出来的（site-packages）→ **绝不能写在那儿**：
+        #   · 系统安装时那个目录不可写
+        #   · `pipx upgrade` / `pip install -U` 会重建环境，
+        #     **用户的 API Key 就这么没了**
+        # 所以装出来的放数据根（~/.vibe-agent/.env），和会话、记忆在一起。
+        if (root / "run.py").is_file() or (root / ".git").exists():
+            return root / ".env"
+
+        from .paths import agent_home
+
+        return agent_home() / ".env"
 
     @property
     def has_vision(self) -> bool:

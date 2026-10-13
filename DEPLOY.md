@@ -348,3 +348,49 @@ va doctor
 
 **版本要对得上。** 包名里带 commit 号（`vibe-agent-0.1.0-ef05be7.tar.gz`），
 让对方报这个号，你就知道他在跑哪一版。
+
+---
+
+## 装完 `va` 找不到？
+
+**pipx 把命令装在 `~/.local/bin`，而那个目录常常不在 PATH 里**——
+这不是 agent 的问题，是 pipx 的经典坑。
+
+```bash
+pipx ensurepath      # 一行修
+# 然后重开一个终端（或 source ~/.zshrc）
+```
+
+还是不行就按顺序查：
+
+```bash
+pipx list                    # ① 装上了吗
+ls ~/.local/bin/va           # ② 文件在哪
+~/.local/bin/va web          # ③ 绕过 PATH 直接跑
+echo $PATH | tr ':' '\n' | grep local   # ④ PATH 里有吗
+```
+
+**第 ③ 步是关键**：能跑 → 就是 PATH 问题；找不到文件 → 安装本身失败了。
+
+手动加 PATH（写进 `~/.zshrc`）：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Windows 上
+
+pipx 的 bin 目录通常是 `%USERPROFILE%\.local\bin`，加进 PATH：
+
+```powershell
+pipx ensurepath
+# 然后重开 PowerShell
+```
+
+**如果不熟悉 PATH 配置**，用压缩包那条路更省事——`scripts/install.sh`
+不依赖 PATH：
+
+```bash
+tar xzf vibe-agent-*.tar.gz && cd vibe-agent
+./scripts/install.sh
+```
