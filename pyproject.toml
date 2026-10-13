@@ -15,3 +15,11 @@ va = "va.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["va*"]
+
+# **静态文件必须显式声明。**
+#
+# `packages.find` 只收 Python 包，`va/web/static/index.html` 不会被打进去——
+# 结果就是别人 `pip install` 之后网页界面直接坏掉（服务端找不到 HTML）。
+# 这个坑只有真的构建一次 wheel 才看得出来，本地跑源码永远正常。
+[tool.setuptools.package-data]
+va = ["web/static/*", "web/static/**/*"]

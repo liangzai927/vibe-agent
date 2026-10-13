@@ -45,12 +45,50 @@ class LLMError(RuntimeError):
 class LLM:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self._client = OpenAI(
-            api_key=cfg.api_key,
-            base_url=cfg.base_url,
-            max_retries=0,  # 重试由我们自己控制，便于打印提示
-        )
         self._retryable = _retryable_types()
+        # **没有 key 也要能构造。**
+        #
+        # 原来在 __init__ 里直接建客户端，于是「没配 key」会让
+        # `Agent(...)` 构造失败 → `WebApp(...)` 构造失败 → `va web` 起不来。
+        # 而设置页恰恰是用来配 key 的——**界面开不了就没法配，是个死锁**。
+        #
+        # 所以客户端延迟到真正要调用时才建，缺凭据的报错也放到那时候，
+        # 措辞能直接告诉用户怎么办。
+        self._client: OpenAI | None = None
+        if cfg.api_key:
+            self._client = OpenAI(
+                api_key=cfg.api_key,
+                base_url=cfg.base_url,
+                max_retries=0,  # 重试由我们自己控制，便于打印提示
+            )
+
+    def refresh(self) -> None:
+        """凭据变了之后重建客户端。
+
+        设置页改完 key 会调它——不然改了 key 还在用旧的连（或者一直用不了）。
+        """
+        self._client = None
+        if self.cfg.api_key:
+            self._client = OpenAI(
+                api_key=self.cfg.api_key,
+                base_url=self.cfg.base_url,
+                max_retries=0,
+            )
+
+    def _ensure_client(self) -> "OpenAI":
+        if self._client is not None:
+            return self._client
+        if not self.cfg.api_key:
+            raise LLMError(
+                "还没配 API Key，没法调用模型。\n"
+                "  界面上填：设置 → 模型接口\n"
+                "  或者：va setup"
+            )
+        # 运行途中才拿到的 key（比如刚在设置里填的）
+        self.refresh()
+        if self._client is None:
+            raise LLMError("模型客户端建不起来，检查 API Key 和 Base URL")
+        return self._client
 
     # ------------------------------------------------------------------ public
 
@@ -97,7 +135,7 @@ class LLM:
         on_text: TextSink | None,
         on_reasoning: ReasoningSink | None,
     ) -> AssistantTurn:
-        stream = self._client.chat.completions.create(**payload)
+        stream = self._ensure_client().chat.completions.create(**payload)
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []

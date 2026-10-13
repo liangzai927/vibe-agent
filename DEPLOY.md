@@ -239,3 +239,112 @@ docker compose build && docker compose run --rm va
 | `__pycache__/` | Python 版本不同会用不了 |
 
 `./scripts/package.sh` 已经把这些全排除了，并且打完会**再检查一遍**确认没漏。
+
+---
+
+# 发给别人用
+
+**和「部署到我自己另一台机器」是两件事。** 别人需要的是：他自己的 key、
+他自己的数据，以及**一条命令就能装好**。
+
+## 先搞清楚：什么会跟着走，什么不会
+
+| | 会不会给对方 |
+|---|---|
+| 程序代码 | ✅ 会 |
+| **你的 API Key** | ❌ **不会**（打包脚本从 git 已提交内容打，`.env` 本来就在 `.gitignore` 里） |
+| **你的会话记录 / 记忆** | ❌ 不会（在你自己机器的数据根里） |
+| **你的任务状态 / 事故日志** | ❌ 不会（同上） |
+
+对方装完之后是**完全独立的一份**：他自己的 key、他自己的记录，
+看不到你的任何东西。
+
+## 三种给法，按「对方是什么人」选
+
+### ① 对方会敲命令 → 一行装好（推荐）
+
+```bash
+pipx install "git+https://github.com/liangzai927/vibe-agent.git"
+```
+
+`pipx` 会把它装在独立环境里、不污染对方的 Python，并且直接给出 `va` 命令。
+（没有 pipx 的话：`pip install --user "git+..."`）
+
+装完：
+
+```bash
+va web          # 起界面，在「设置 → 模型接口」里填自己的 key
+```
+
+**这是最省事的**，因为后续 `pipx upgrade` 就能更新。
+
+> 如果仓库是私有的，对方需要自己的 Git 访问权限，或者你改用方式 ②。
+
+### ② 对方不太会敲命令 → 发一个压缩包
+
+```bash
+make package
+# → dist/vibe-agent-0.1.0-<commit>.tar.gz（约 190KB）
+#   末尾还会打印 sha256，方便对方校验
+```
+
+把 tar.gz 发给对方（微信、邮件、内网盘都行），对方解压后：
+
+```bash
+cd vibe-agent
+./scripts/install.sh        # 建 venv、装依赖、问你要 key
+```
+
+`install.sh` 会一步步引导：Python 版本、依赖、API Key、浏览器（可选）。
+全程不用记命令。
+
+### ③ 对方机器上不想装 Python → Docker
+
+```bash
+docker compose up -d
+```
+
+镜像里 Python、Node、Chromium 都有。适合团队统一部署或者给非开发同学。
+
+（细节见上面的「方式 A」。）
+
+## 对方第一次跑会看到什么
+
+```
+$ va web
+还没有配置模型服务——界面能打开，但跑任务前要先配。
+  打开后：设置 → 模型接口，填 API Key
+  或者先跑向导：va setup
+  配置文件：~/.vibe-agent/.env
+```
+
+**界面能打开**（这是故意的）——设置页就是用来配 key 的。
+
+## 对方需要准备什么
+
+| | 必需 | 说明 |
+|---|---|---|
+| Python 3.10+ | ✅ | 方式 ① ② 需要；方式 ③ 不用 |
+| 一个模型 API Key | ✅ | DeepSeek / OpenAI / 任何兼容接口都行 |
+| Node 18+ | 可选 | 只有接 MCP（比如 MasterGo 设计稿）才需要 |
+| 浏览器 | 可选 | 只有做 UI 渲染 / 功能测试才需要，`make install-browser` |
+
+## 出了问题让对方跑这个
+
+```bash
+va doctor
+```
+
+会逐项检查 Python、依赖、git、浏览器、API 连通性，并给出修复建议。
+
+## 你要注意的几件事
+
+**别把 `.env` 一起打包。** `make package` 默认从 **git 已提交内容**打包，
+而 `.env` 在 `.gitignore` 里——所以默认是安全的。
+用 `--working-tree` 会连未提交的改动一起打，**那时候要自己确认 `.env` 没被带上**。
+
+**对方的数据在你管不着的地方。** 每人一份独立的，出问题让他跑 `va doctor`
+并把输出贴给你。
+
+**版本要对得上。** 包名里带 commit 号（`vibe-agent-0.1.0-ef05be7.tar.gz`），
+让对方报这个号，你就知道他在跑哪一版。

@@ -522,13 +522,14 @@ class WebApp:
             model_changed = True
 
         if model_changed:
-            try:
-                from ..llm import LLM
-
-                # **重建客户端**，否则改了 key 还是用旧的连
-                self.agent.set_model(self.cfg.model)
-            except Exception as exc:  # noqa: BLE001
-                notes.append(f"配置已保存，但重建模型客户端失败：{exc}")
+            # **重建客户端**，否则改了 key 还是用旧的连。
+            # 每个会话的 agent 都要重建——它们各有自己的 LLM 实例。
+            for runtime in self.runtimes.values():
+                try:
+                    runtime.agent.set_model(self.cfg.model)
+                except Exception as exc:  # noqa: BLE001
+                    notes.append(f"配置已保存，但重建模型客户端失败：{exc}")
+                    break
 
         if payload.get("setup_data_repo"):
             from ..data_repo import run as run_setup

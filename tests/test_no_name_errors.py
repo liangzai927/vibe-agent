@@ -225,3 +225,74 @@ class TestNoDeadlockWithoutAKey(AgentTestCase):
         self.assertNotIn("return 2", branch, "没配 key 又把界面挡回去了")
         self.assertIn("界面能打开", branch)
 
+
+
+class TestLLMWithoutAKey(AgentTestCase):
+    """**没有 key 也要能构造 Agent。**
+
+    用户报过：`va web` 起来了却立刻崩——
+
+        openai.OpenAIError: Missing credentials.
+
+    根因是 `LLM.__init__` 里直接建 OpenAI 客户端，于是
+    「没配 key」→ `Agent(...)` 失败 → `WebApp(...)` 失败 → `va web` 起不来。
+    而设置页恰恰是用来配 key 的——**界面开不了就没法配，又是个死锁。**
+
+    所以客户端延迟到真正调用时才建，报错也放到那时候，措辞能直接告诉
+    用户怎么办。
+    """
+
+    def test_llm_can_be_constructed_without_a_key(self):
+        from dataclasses import replace
+
+        from va.llm import LLM
+
+        llm = LLM(replace(self.cfg, api_key=""))
+        self.assertIsNone(llm._client)
+
+    def test_agent_can_be_constructed_without_a_key(self):
+        """整条链路都要能构造——不然界面还是起不来。"""
+        from dataclasses import replace
+
+        from va.loop import Agent
+        from va.ui import UI
+
+        agent = Agent(replace(self.cfg, api_key=""), UI(self.workspace), workspace=self.workspace)
+        self.assertIsNotNone(agent)
+
+    def test_calling_it_says_how_to_fix_it(self):
+        """**失败要发生在「用」的时候，而不是「启动」的时候**，
+        而且要说清怎么办。"""
+        from dataclasses import replace
+
+        from va.llm import LLM, LLMError
+
+        llm = LLM(replace(self.cfg, api_key=""))
+        with self.assertRaises(LLMError) as ctx:
+            list(llm.complete([{"role": "user", "content": "hi"}]))
+        message = str(ctx.exception)
+        self.assertIn("API Key", message)
+        self.assertIn("设置 → 模型接口", message)
+
+    def test_refresh_picks_up_a_key_added_later(self):
+        """**在设置里填完 key 要能立刻用**——不用重启。"""
+        from dataclasses import replace
+
+        from va.llm import LLM
+
+        cfg = replace(self.cfg, api_key="")
+        llm = LLM(cfg)
+        self.assertIsNone(llm._client)
+
+        cfg.api_key = "sk-填进去的-1234567890"
+        llm.refresh()
+        self.assertIsNotNone(llm._client, "填了 key 还是建不出客户端")
+
+    def test_the_webapp_constructs_without_a_key(self):
+        """`va web` 起不来的真正原因就在这条链路上。"""
+        from dataclasses import replace
+
+        from va.web.server import WebApp
+
+        app = WebApp(replace(self.cfg, api_key=""), self.workspace)
+        self.assertIsNotNone(app)
