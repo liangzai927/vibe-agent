@@ -626,3 +626,103 @@ class TestHelpfulMessages(AgentTestCase):
                 if "python3 run.py" in stripped and "写死" not in stripped and "以前" not in stripped:
                     offenders.append(f"{path.name}:{number}")
         self.assertEqual(offenders, [], f"还有写死的相对命令：{offenders}")
+
+
+
+class TestConfigMigration(AgentTestCase):
+    """升级之后**不该让用户重新填一遍 key**。
+
+    装出来的包以前把 `.env` 写在 `site-packages/` 旁边，现在改到数据根了。
+    已经配过的人升级之后，旧位置的那份要自动搬过来。
+    """
+
+    def test_old_config_is_adopted(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from va.config import _adopt_old_package_env
+
+        old = Path(tempfile.mkdtemp()) / ".env"
+        old.write_text("VA_API_KEY=sk-升级前就有的-1234567890\n", encoding="utf-8")
+        target = Path(tempfile.mkdtemp()) / ".env"
+
+        _adopt_old_package_env(old, target)
+        self.assertTrue(target.is_file(), "旧配置没搬过来——用户得重填")
+        self.assertIn("sk-升级前就有的", target.read_text(encoding="utf-8"))
+
+    def test_it_never_overwrites(self):
+        """**绝不覆盖已有的**——用户可能刚在新位置填好。"""
+        import tempfile
+        from pathlib import Path
+
+        from va.config import _adopt_old_package_env
+
+        old = Path(tempfile.mkdtemp()) / ".env"
+        old.write_text("VA_API_KEY=sk-旧的\n", encoding="utf-8")
+        target = Path(tempfile.mkdtemp()) / ".env"
+        target.write_text("VA_API_KEY=sk-新填的\n", encoding="utf-8")
+
+        _adopt_old_package_env(old, target)
+        self.assertIn("sk-新填的", target.read_text(encoding="utf-8"))
+
+    def test_empty_old_config_is_ignored(self):
+        import tempfile
+        from pathlib import Path
+
+        from va.config import _adopt_old_package_env
+
+        old = Path(tempfile.mkdtemp()) / ".env"
+        old.write_text("   \n\n", encoding="utf-8")
+        target = Path(tempfile.mkdtemp()) / ".env"
+
+        _adopt_old_package_env(old, target)
+        self.assertFalse(target.exists(), "把空文件也搬过来了")
+
+    def test_no_old_file_is_fine(self):
+        import tempfile
+        from pathlib import Path
+
+        from va.config import _adopt_old_package_env
+
+        target = Path(tempfile.mkdtemp()) / ".env"
+        _adopt_old_package_env(Path("/definitely/not/here/.env"), target)
+        self.assertFalse(target.exists())
+
+
+class TestInstalledVsSource(AgentTestCase):
+    """从源码跑和装出来的，配置该放两个不同的地方。"""
+
+    def test_source_checkout_uses_the_repo(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from va.config import Config
+
+        fake_repo = Path(tempfile.mkdtemp())
+        (fake_repo / "run.py").write_text("", encoding="utf-8")
+        # **要先摘掉 VA_ENV_FILE**——它的优先级最高（helpers 会给测试设上），
+        # 不摘的话这里测的是它，不是「源码 vs 装出来」的分支。
+        env = {k: v for k, v in os.environ.items() if k != "VA_ENV_FILE"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(Config.env_file(fake_repo), fake_repo / ".env")
+
+    def test_installed_package_uses_the_data_root(self):
+        """**绝不能写进 site-packages**：系统安装不可写，
+        而且 `pipx upgrade` 重建环境会把 key 弄丢。"""
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from va.config import Config
+        from va.paths import agent_home
+
+        fake_site = Path(tempfile.mkdtemp())      # 既没有 run.py 也没有 .git
+        env = {k: v for k, v in os.environ.items() if k != "VA_ENV_FILE"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            target = Config.env_file(fake_site)
+            self.assertNotEqual(target, fake_site / ".env")
+            self.assertEqual(target, agent_home() / ".env")

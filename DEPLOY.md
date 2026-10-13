@@ -394,3 +394,77 @@ pipx ensurepath
 tar xzf vibe-agent-*.tar.gz && cd vibe-agent
 ./scripts/install.sh
 ```
+
+---
+
+## 怎么更新（已经装了的人）
+
+看当初是怎么装的，对号入座：
+
+### pipx 装的（推荐路径）
+
+```bash
+pipx install --force "git+https://github.com/liangzai927/vibe-agent.git"
+```
+
+**用 `--force` 而不是 `pipx upgrade`**：从 git 装的时候，`upgrade` 有时会用
+缓存的旧版本，`--force` 一定会重新拉。
+
+### 压缩包装的
+
+```bash
+tar xzf vibe-agent-新版本.tar.gz
+cd vibe-agent
+./scripts/install.sh
+```
+
+配置不会被覆盖——`install.sh` 只在没有配置时才问你要 key。
+
+### git clone 的
+
+```bash
+cd vibe-agent
+git pull
+.venv/bin/pip install -r requirements.txt     # 依赖有变动时
+```
+
+### Docker 的
+
+```bash
+docker compose build && docker compose up -d
+```
+
+---
+
+## 更新之后 key 会丢吗
+
+**正常情况不会。** 配置在 `~/.vibe-agent/.env`（或仓库目录下的 `.env`），
+不在程序目录里，所以换版本不影响。
+
+**只有一种情况需要注意**：从很老的版本（配置写在 `site-packages` 旁边）
+升上来时，那份配置会被**自动搬到**新位置——代码里有这个逻辑，
+而且**绝不覆盖**你已经在新位置填好的。
+
+如果更新后 `va web` 说「还没配 API Key」，**先确认配置文件在哪**：
+
+```bash
+va doctor
+```
+
+它会打印当前用的配置文件路径。真丢了就重填一次：
+
+```bash
+va web     # 设置 → 模型接口
+```
+
+---
+
+## 更新完先跑这个
+
+```bash
+va doctor
+```
+
+逐项检查 Python、依赖、git、浏览器、API 连通性。
+**报版本号**：包里带 commit 号（`vibe-agent-0.1.0-<commit>.tar.gz`），
+出问题时报这个号，别人就知道你在跑哪一版。

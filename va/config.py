@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -138,7 +139,9 @@ class Config:
 
         from .paths import agent_home
 
-        return agent_home() / ".env"
+        target = agent_home() / ".env"
+        _adopt_old_package_env(root / ".env", target)
+        return target
 
     @property
     def has_vision(self) -> bool:
@@ -239,6 +242,31 @@ class Config:
                 f"\n"
                 f"  当前配置文件：{Config.env_file()}\n"
             )
+
+
+def _adopt_old_package_env(old: Path, target: Path) -> None:
+    """把「以前写在包目录里的配置」搬到新位置。
+
+    **装出来的包以前把 .env 写在 `site-packages/` 旁边**，那有两个毛病：
+    系统安装时不可写，而且 `pipx upgrade` 会重建环境——key 就这么没了。
+    现在改到数据根，但**已经配过的人不该在升级后重新填一遍**，
+    所以这里顺手搬过去。
+
+    只在「新位置还没有、旧位置有」的时候搬，**绝不覆盖已有的**。
+    """
+    try:
+        if target.exists() or not old.is_file():
+            return
+        if not old.read_text(encoding="utf-8").strip():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old, target)
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass          # 搬不动就算了，用户重填一次也不是灾难
 
 
 def run_hint(subcommand: str = "setup") -> str:
