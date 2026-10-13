@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .config import run_hint
 from .models import ModelCatalog, fetch_models, save_catalog, suggest_model
 from .util import bold, cyan, dim, green, red, yellow
 
@@ -287,7 +288,7 @@ def run(
             say(green(f"  ✓ 连通（{chosen} → {detail!r}）"))
         else:
             say(red(f"  ✗ 连不上：{detail}"))
-            say(dim(f"    配置已经写进 {env_path}，改好之后重跑：python3 run.py doctor"))
+            say(dim(f"    配置已经写进 {env_path}，改好之后重跑：{run_hint('doctor')}"))
 
     say("")
     say(bold("  配置完成"))

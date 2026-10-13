@@ -9,6 +9,7 @@
 """
 
 from __future__ import annotations
+from dataclasses import replace
 
 import json
 import os
@@ -567,3 +568,61 @@ class TestModelConfig(AgentTestCase):
         result = self.app.update_settings({})
         self.assertEqual(self.cfg.api_key, "sk-old-key-1234567890")
         self.assertNotIn("api_key", result.get("changed", []))
+
+
+class TestHelpfulMessages(AgentTestCase):
+    """提示语里给的命令，**必须真的能跑**。
+
+    用户报过：`va` 提示「先跑一遍向导：python3 run.py setup」，
+    但他在 `~` 下运行，得到的是
+    `can't open file '/Users/xxx/run.py'`。
+
+    写死 `python3 run.py` 有两个毛病：
+      · 只有在仓库目录里才对
+      · 用的是系统 python，不是装了依赖的那个 venv
+    """
+
+    def test_the_hint_is_an_absolute_invocation(self):
+        from va.config import run_hint
+
+        hint = run_hint("setup")
+        self.assertIn("setup", hint)
+        # 要么是短命令，要么必须有绝对路径——相对路径换个目录就废了
+        if not hint.startswith("va "):
+            self.assertIn("/", hint, f"给的是相对路径，换个目录就跑不了：{hint}")
+
+    def test_the_missing_key_message_mentions_the_ui_first(self):
+        """**界面上填才是大多数人该走的路**——让他们去手写 .env、
+        还得找对路径和解释器，纯属折腾。"""
+        cfg = replace(self.cfg, api_key="")
+        with self.assertRaises(SystemExit) as ctx:
+            cfg.require_key()
+        message = str(ctx.exception)
+        self.assertIn("界面上填", message)
+        self.assertIn("设置 → 模型接口", message)
+        self.assertLess(
+            message.index("界面上填"), message.index("环境变量"),
+            "界面那条该排在前面",
+        )
+
+    def test_the_missing_key_message_says_which_file(self):
+        """"在项目根目录创建 .env" 没说清是哪个项目根——直接把路径写出来。"""
+        with self.assertRaises(SystemExit) as ctx:
+            replace(self.cfg, api_key="").require_key()
+        self.assertIn("当前配置文件", str(ctx.exception))
+
+    def test_no_message_still_hardcodes_a_relative_command(self):
+        """任何提示里都不该再出现 `python3 run.py` 这种写法。"""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "va"
+        offenders = []
+        for path in root.rglob("*.py"):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or '"""' in stripped or stripped.startswith("·"):
+                    continue
+                # docstring 里提到是可以的（那是解释为什么改）
+                if "python3 run.py" in stripped and "写死" not in stripped and "以前" not in stripped:
+                    offenders.append(f"{path.name}:{number}")
+        self.assertEqual(offenders, [], f"还有写死的相对命令：{offenders}")

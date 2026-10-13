@@ -205,11 +205,42 @@ class Config:
 
     def require_key(self) -> None:
         if not self.api_key:
+            # **第一条要提界面上填。** 这是绝大多数人该走的路——
+            # 让他们去手写 .env、还要找对路径和解释器，纯属折腾。
+            # （原来的说法是「在项目根目录创建 .env」，既没说是哪个项目根，
+            #   也没提界面，第一次上手的人只能猜。）
             raise SystemExit(
-                "缺少 API key。\n"
-                "  方式一：在项目根目录创建 .env（参考 .env.example）\n"
-                "  方式二：export VA_API_KEY=sk-xxx\n"
+                "缺少 API key。三种做法，挑一个：\n"
+                "\n"
+                "  ① 界面上填（推荐）\n"
+                "       va web，然后在「设置 → 模型接口」里填 API Key\n"
+                "\n"
+                "  ② 跑一遍向导\n"
+                f"       {run_hint()}\n"
+                "\n"
+                "  ③ 直接给环境变量\n"
+                "       export VA_API_KEY=sk-xxx\n"
+                f"\n"
+                f"  当前配置文件：{Config.env_file()}\n"
             )
+
+
+def run_hint(subcommand: str = "setup") -> str:
+    """给一条**在任何目录下都能直接粘贴**的命令。
+
+    写死 `python3 run.py setup` 有两个毛病：只有在仓库目录里才对
+    （在别处会得到 `can't open file '.../run.py'`），而且用的是系统
+    python 而不是装了依赖的 venv。所以按实际怎么启动的来给。
+    """
+    import shutil
+    import sys
+
+    if shutil.which("va"):
+        return f"va {subcommand}"
+    entry = Path(sys.argv[0]).resolve()
+    if entry.is_file() and entry.suffix == ".py":
+        return f'"{sys.executable}" "{entry}" {subcommand}'
+    return f"va {subcommand}"
 
 
 def write_env_values(path: Path, values: dict[str, str]) -> Path:

@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .config import run_hint
 from . import browser as browser_mod
 from .config import Config
 from .session import SessionStore
@@ -331,7 +332,7 @@ def _render(report: Report, cfg: Config) -> None:
 
     if blocking:
         print(red(f"  ✗ {len(blocking)} 项必需检查未通过，agent 无法正常工作。"))
-        print(dim("    按上面的提示逐项修复后重跑：python3 run.py doctor"))
+        print(dim(f"    按上面的提示逐项修复后重跑：{run_hint('doctor')}"))
     else:
         print(green("  ✓ 必需项全部通过。"))
     print(dim(f"  必需 {req_ok}/{req_total} · 可选 {opt_ok}/{opt_total} 可用"))

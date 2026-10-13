@@ -51,10 +51,10 @@ HELP = """可用命令：
 图片路径。终端本身传不了图片数据，所以用这个标记来「粘贴」。
 
 子命令：
-  python3 run.py web                                        浏览器界面（可视化，支持拖拽传图）
-  python3 run.py setup                                      首次配置（也可以直接启动，没配会自己引导）
-  python3 run.py doctor [--offline] [--quick] [--json]     环境自检
-  python3 run.py feature "需求描述" [--doc X --design Y]    功能开发流水线
+  va web                                                    浏览器界面（可视化，支持拖拽传图）
+  va setup                                                  首次配置（也可以直接启动，没配会自己引导）
+  va doctor [--offline] [--quick] [--json]                  环境自检
+  va feature "需求描述" [--doc X --design Y]                 功能开发流水线
 """
 
 
@@ -665,8 +665,9 @@ def _web(argv: list[str]) -> int:
         return 2
 
     if not cfg.api_key:
-        print(yellow("还没有配置模型服务。先跑一遍向导："), file=sys.stderr)
-        print(dim("  python3 run.py setup"), file=sys.stderr)
+        print(yellow("还没有配置模型服务。两种做法："), file=sys.stderr)
+        print(dim("  ① 界面上填（推荐）：跑 `va web`，在「设置 → 模型接口」里填"), file=sys.stderr)
+        print(dim(f"  ② 命令行向导：{run_hint('setup')}"), file=sys.stderr)
         return 2
 
     from .web import WebApp, serve
@@ -951,7 +952,7 @@ def _show_models(agent: Agent, ui: UI) -> None:
     catalog = load_catalog(Path(__file__).resolve().parent.parent)
     if catalog is None or not catalog.models:
         ui.info("还没有模型清单。")
-        ui.info("进入 agent 前跑一次 `python3 run.py setup` 就能拉下来。")
+        ui.info(f"进入 agent 前跑一次 `{run_hint('setup')}` 就能拉下来。")
         return
 
     current = agent.cfg.model
@@ -992,7 +993,7 @@ def _switch_model(agent: Agent, ui: UI, name: str) -> None:
         # 手打模型名既费事又容易打错，而换模型是个高频动作。
         if not catalog or not catalog.models:
             ui.info(f"当前模型：{agent.cfg.model}")
-            ui.warn("还没有模型清单，跑一次 `python3 run.py setup` 就能拉下来。")
+            ui.warn(f"还没有模型清单，跑一次 `{run_hint('setup')}` 就能拉下来。")
             return
         if len(catalog.models) == 1:
             ui.info(f"只有一个可用模型：{catalog.ids[0]}")
