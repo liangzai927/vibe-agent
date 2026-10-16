@@ -1090,13 +1090,13 @@ Python 3.10+ / one required dependency / Docker-ready / terminal and browser UIs
 
 - [ ] Multiple concurrent sessions (currently one at a time)
 - [ ] Session list and search
-- [ ] `@file` references (only `@clip` for images today)
+- [x] `@file` references (type `@` for completion; folders too)
 - [ ] Usage and cost tracking
 - [ ] Hooks / custom commands
 - [ ] Test-driven loop (run tests after edits and iterate to green)
 - [ ] Parallel tool execution (tools within a turn run sequentially today)
 - [ ] Finer-grained permissions (per tool, per path pattern)
-- [ ] MCP support
+- [x] MCP support (the standard protocol for external tools)
 - [ ] Desktop app packaging (macOS / Windows)
 
 ---
